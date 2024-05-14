@@ -113,11 +113,22 @@
   ✓ push
   ✓ unbreak pagination after I edited the code
   ✓ push
-
-
-
-
-
+  ✓ support ollama API
+  ✓ support ollamas conf var
+  ✓ support llama.cpp server
+  ✓ update :model
+  ✓ block references
+    ✓ add :expandrefs to see it
+    ✓ implement expand_refs()
+    ✓ update comment_to_prompt to expand refs
+    ✓ test using langtable
+      ✓ #find_blocks_language
+      ✓ #tmp_filename
+      ✓ #block_comment_part
+  ✓ add depth to expand_refs_rec
+  ✓ make chase_refs support :code and :all
+    ✓ add block_by_id
+    ✓ add block_transforms(b,f)
 
 
 
@@ -126,11 +137,29 @@
 
 
 WHAT WE ARE CURRENTLY DOING:
-  ✓ support ollama API
+  → basic diff features "d" for diff (by def. w/ prev rev) of block and "u" (undo)  4 3 12
+      add "U" with a listing, most-recent first
+        checksum and index blocks
+          design how it will work
+        → implement checksums for blocks, lines, files (in #checksum_code)
+          implement checksums for each rev
+        implement rev-chron linear search
+        implement "find previous version of block"
 
 
-    block references
+    "Error: Block does not belong to any file." happened
+      context: added a space before a "#" in the last markdown block in the last file, then :wq
+    actually index block ids
+    make "#" jump to block by id (or maybe a menu!)
+    explore "prompt palette" idea
+    fix the first-line thing on @id:code
+    replace spans arena with generic implementation
+    make .n start at 0
+    keep ollama model loaded
+    make LLM calls asynchronous
     clipboard model set automatically
+    rename bootstrap to genesis
+    add :allfiles to autopopulate conf, and an empty state
     cmprdir should be auto-set
     ~/.cmpr for top-level conf
     send everything to LLM and create a bootstrap? ctags?
@@ -164,7 +193,6 @@ WHAT WE ARE CURRENTLY DOING:
     think about LLM refactoring
     first steps on the road total rev awareness 4 4 16
     basic summarize feature (at least vjjjjj should give you something maximizing cols*5 chars worth)
-    basic diff features "d" for diff (by def. w/ prev rev) of block and "u" (undo)  4 3 12
     bring compiler errors into the workflow (line no -> block, etc) 3 3 9
     try more with VSCode support  4 2 8
     add translations into ~every language 4 2 8

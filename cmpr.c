@@ -1,11 +1,23 @@
-/* test block
+/* #test_block
 Here we have a function int add(int, int).
 */
 
 int add(int a, int b) {
     return a + b;
 }
+/* #test_refs @test_block @config_fields
 
+Line one.
+
+@projfiles
+
+Line N.
+
+Here's our add function:
+
+@test_block:code
+
+*/
 /* import libraries 
 */
 
@@ -31,7 +43,8 @@ So we spent 14 millionths of a dollar on output and 10 millionths on input.
 Current pricing is at: https://openai.com/pricing
 */
 
-/* #langtable #NaturalLanguageTabularProgramming #replywithok
+/* #langtable
+
 Here we have a table of languages that we support.
 
 (The columns are written as numbered items, for easier editing in text form.)
@@ -95,17 +108,33 @@ The config settings are:
 - cbcopy, the command to pipe data to the clipboard on the user's platform
 - cbpaste, the same but for getting data from the clipboard
 - curlbin, the path to curl (or just "curl" if unspecified)
-- model, the LLM currently in use, one of "gpt-3.5-turbo", "gpt-4-turbo", "clipboard"
+- ollamas, a comma-separated list of ollama models to use
+- model, the LLM currently in use, or "clipboard" for browser chat models
 */
 
 #define CONFIG_FIELDS \
-    X(cmprdir) \
-    X(buildcmd) \
-    X(bootstrap) \
-    X(cbcopy) \
-    X(cbpaste) \
-    X(curlbin) \
-    X(model)
+  X(cmprdir) \
+  X(buildcmd) \
+  X(bootstrap) \
+  X(cbcopy) \
+  X(cbpaste) \
+  X(curlbin) \
+  X(ollamas) \
+  X(model)
+
+/* #checksums
+
+Similar to projfiles, we have a generic arena-allocated array type for checksums, which we make by MAKE_ARENA with E = checksum, T = checksums, and 256 for the stack size.
+
+Prior to this we typedef checksum as a struct containing only a u64.
+Usually this will not be accessed, so we call it __u.
+*/
+
+typedef struct {
+    u64 __u;
+} checksum;
+
+MAKE_ARENA(checksum, checksums, 256)
 
 /* #projfiles
 
@@ -116,7 +145,7 @@ We have a projfile type which contains for each file:
 - the path as a span
 - the language, also a span
 - the contents of the file, also a span
-- a checksum of the contents, a u64
+- a checksum of the contents, called cksum
 
 Here we have a typedef for the projfile.
 
@@ -127,10 +156,17 @@ typedef struct {
     span path;
     span language;
     span contents;
-    u64 checksum;
+    checksum cksum;
 } projfile;
 
 MAKE_ARENA(projfile, projfiles, 256)
+/* #rev_info
+
+This structure holds metadata on our revs, and has the following elements:
+
+- filenames, a spans holding paths (under revs/) in rev. lexicographic order (also rev. chronological order)
+- cksums, a checksums which may be only partially populated
+*/
 
 /* #ui_state
 
@@ -140,9 +176,13 @@ This includes, so far:
 - files, a projfiles array of files in the project
 - current language, a span, used by the file/language config handler functions
 - the blocks, a spans
+- block_cksums, a checksums holding checksums for each block
+- the lines, a spans
+- line_cksums, a checksums for the lines
 - the current_index, the number of blocks prior to the selected one (i.e. zero-indexed)
-- the current_file, the number of files prior to the selected one
+- the jk_index, the number of "j/k items" prior to the selected one
 - a marked_index, which represent the "other end" of a selected range
+- revs, a rev_info structure which stores metadata about our revision history
 - the search span which will contain "/" followed by some search if in search mode, otherwise will be empty()
 - the previous search span, used for n/N
 - the ex_command which similarly contains ":" if in ex command entry mode, otherwise empty()
@@ -151,8 +191,9 @@ This includes, so far:
 - scrolled_lines, the number of physical lines that have been scrolled off the screen upwards
 - openai_key, an OpenAI API key, or an empty span
 - bootstrapprompt, either empty or contains the bootstrap prompt
+- ollama_models, a spans of the configured ollama model names if any
 
-Additionally, we include a span for each of the config files, with an X macro inside the struct, using CONFIG_FIELDS defined above.
+Additionally, we include a span for each of the config fields, with an X macro inside the struct, using CONFIG_FIELDS defined above.
 
 Below the ui_state struct/typedef, we declare a global ui_state* state, which will be initialized below by main().
 */
@@ -161,6 +202,9 @@ typedef struct ui_state {
     projfiles files;
     span current_language;
     spans blocks;
+    checksums block_cksums;
+    spans lines;
+    checksums line_cksums;
     int current_index;
     int marked_index;
     span search;
@@ -172,16 +216,17 @@ typedef struct ui_state {
     int scrolled_lines;
     span openai_key;
     span bootstrapprompt;
+    spans ollama_models;
     #define X(name) span name;
     CONFIG_FIELDS
     #undef X
 } ui_state;
 
 ui_state* state;
+
 /* network return type, used by LLM API functions
 
 Contains a response, generally json, if success; an error, a human readable string, otherwise.
-
 */
 
 typedef struct {
@@ -201,6 +246,7 @@ void keyboard_help();
 
 // LLM APIs
 void call_llm(span model, json messages, void (*cb)(span));
+// GPT and llama.cpp
 void read_openai_key();
 network_ret call_gpt(json messages, span model); // OpenAI API entry point
 network_ret call_gpt_curl(span,span,span); // network helper function
@@ -232,11 +278,19 @@ void handle_openai_response(span, void (*)(span));
 void handle_ollama_response(span, void (*)(span));
 void replace_code_clipboard();
 span block_comment_part(span block);
+span block_comment_part_excl(span); // exclusive of comment delimiters
+span block_code_part(span);
+span block_transforms(span,span fn); // transform block by named function
 span comment_to_prompt(span comment);
+void ex_expandrefs();
+span expand_refs(span);
+void expand_refs_rec(span,int);
+span chase_ref(span);
 span strip_markdown_codeblock(span);
 void send_to_clipboard(span prompt);
 int file_for_block(span block);
 span current_block_language();
+span language_for_block(span);
 void replace_block_code_part(span new_code);
 int launch_editor(char* filename);
 void handle_edited_file(char* filename);
@@ -255,7 +309,8 @@ void perform_search();
 void finalize_search();
 void search_forward();
 void search_backward();
-int find_block(span);
+int find_block(span); // find first block containing text
+int block_by_id(span); // find a block by id (without hash char)
 
 // ex commands
 void start_ex();
@@ -266,22 +321,15 @@ void addlib(span);
 void ex_help();
 void set_highlight();
 void reset_highlight();
-void print_menu();
-int select_menu(spans opts, int sel); // allows selecting from a short list of options
 void select_model();
-
-// ingest
-void get_code(); // read and index
-void get_revs();
-spans find_blocks(span);
-spans find_blocks_language(span file, span language);
-void find_blocks_in(span content, span language);
-u64 selected_checksum(span);
-void checksum_blocks();
+int select_menu(spans opts, int sel); // allows selecting from a short list of options
+void print_menu(spans, int);
 
 // pagination and printing
 void page_down();
 void page_up();
+void print_current_blocks();
+void render_block_range(int,int);
 void print_physical_lines(span, int);
 int print_matching_physical_lines(span, span);
 span count_physical_lines(span, int*);
@@ -294,6 +342,22 @@ void print_block(int);
 void print_comment(int);
 void print_code(int);
 int count_blocks();
+void clear_display();
+
+/* #ingest_functions
+
+When we start, get_code handles everything in the current project files, and get_revs handles all the historical revisions in revs/.
+*/
+
+// #ingest
+void get_code(); // read and index current code
+void get_revs(); // read and index revs
+spans find_blocks(span); // find the blocks in a file
+spans find_blocks_language(span file, span language); // find_blocks helper function dispatching on language
+void find_blocks_in(span content, span language); // might be implemented, and used by get_revs some day?
+checksum selected_checksum(span); // our selected checksum implementation
+void checksum_code(); // called by get_code to checksum blocks, lines, and files
+void find_all_lines(); // like find_all_blocks, but for lines; applies to the whole project
 /* #main
 
 In main,
@@ -302,8 +366,11 @@ First we call init_spans, since all our i/o relies on it.
 
 We call projfiles_arena_alloc near the top and and _free before we exit, with room for 1 << 14 (2^14) elements.
 
-We similarly call span_arena_alloc() and span_arena_free() at the end just for clarity even though it doesn't matter anyway since we're exiting the process.
+We similarly call spans_arena_alloc() and spans_arena_free() at the end just for clarity even though it doesn't matter anyway since we're exiting the process.
 We allocate a spans arena of 1 << 20, a binary million spans.
+
+We also call checksums_arena_alloc with 1 << 30, a binary billion.
+(This will need to handle one checksum per line of code in our entire project's history.)
 
 Above (in #ui_state), we have declared a global ui_state* called state, which allows us to not pass around the ui_state singleton all over our program.
 After declaring our ui_state variable in main, which we call stack_state since it's nominally on the stack, being declared in main, and which we initialize to {0}, we then set this global pointer to its address.
@@ -324,8 +391,7 @@ We call check_conf_vars() once after this; we will also call it in the main loop
 We call check_dirs() which creates any missing directories.
 
 Next we call a function get_code().
-This function either handles reading standard input or it reads the files indicated by our config file.
-In either case, once this returns, inp is populated and any other initial code indexing work is done.
+This function reads the files indicated by our config file, populates inp, and handles any code indexing steps.
 
 Next we call get_revs(), which handles reading and indexing all of our revisions (in <cmprdir>/revs).
 
@@ -341,7 +407,8 @@ This also just gets us into the habit of calling flush() everywhere, which is pr
 int main(int argc, char** argv) {
     init_spans();
     projfiles_arena_alloc(1 << 14);
-    span_arena_alloc(1 << 20);
+    spans_arena_alloc(1 << 20);
+    checksums_arena_alloc(1 << 30);
 
     ui_state local_state = {0};
     state = &local_state;
@@ -361,7 +428,8 @@ int main(int argc, char** argv) {
 
     flush();
     projfiles_arena_free();
-    span_arena_free();
+    spans_arena_free();
+    checksums_arena_free();
     return 0;
 }
 
@@ -370,17 +438,17 @@ int main(int argc, char** argv) {
 Here we get a model name, a json object containing chat messages, and a callback function to handle LLM output from a successful API call.
 
 We dispatch on model name.
-If it starts with "gpt" we use the call_gpt function, otherwise call_ollama.
+If it starts with "gpt" or matches "llama.cpp" we use the call_gpt function, otherwise we call_ollama.
 In either case we get back a network_ret object.
 
 In the case of error we report the error to the user, prompt them to hit any key, and wait with getch so they can read the error.
 
-Otherwise we pass the .response and the callback on to either handle_openai_response, for a gpt model, or handle_ollama_response otherwise.
+Otherwise we pass the .response and the callback on to either handle_openai_response, for a gpt/llama.cpp model, or handle_ollama_response otherwise.
 */
 
 void call_llm(span model, json messages, void (*cb)(span)) {
     network_ret result;
-    if (starts_with(model, S("gpt"))) {
+    if (starts_with(model, S("gpt")) || span_eq(model, S("llama.cpp"))) {
         result = call_gpt(messages, model);
     } else {
         result = call_ollama(messages, model);
@@ -391,7 +459,7 @@ void call_llm(span model, json messages, void (*cb)(span)) {
         flush();
         getch(); // User acknowledgment to move past error
     } else {
-        if (starts_with(model, S("gpt"))) {
+        if (starts_with(model, S("gpt")) || span_eq(model, S("llama.cpp"))) {
             handle_openai_response(result.response, cb);
         } else {
             handle_ollama_response(result.response, cb);
@@ -448,8 +516,8 @@ Here we talk to an OpenAI model via the API.
 We are given a json (the type) which contains an array of messages, and a span which contains a model string, and return network_ret.
 
 Next we set up a json object.
-We use prt2cmp() so that the json object will be written to cmp space.
-Using the json api functions, we make a json object and extend it with "messages" as the messages and with "model" as json_s of the model string, then go back to normal with prt2std().
+We use prt_cmp() so that the json object will be written to cmp space.
+Using the json api functions, we make a json object and extend it with "messages" as the messages and with "model" as json_s of the model string, then go back to normal with prt_pop().
 
 We will write the request body and response or error to disk, so first we set up three filenames.
 The filename is <cmprdir>/api_calls/<timestamp>-{req,resp,err} where cmprdir comes from state and the timestamp is in the format YYYYMMDD-hhmmss.
@@ -477,7 +545,7 @@ network_ret call_gpt(json messages, span model) {
     err_filename = concat(base_filename, S("-err"));
 
     // Switch to cmp arena for json object construction
-    prt2cmp();
+    //prt_cmp();
 
     // Construct json object for API request
     json j = json_o();
@@ -485,7 +553,7 @@ network_ret call_gpt(json messages, span model) {
     json_o_extend(&j, S("model"), json_s(model));
 
     // Switch back to standard output arena
-    prt2std();
+    //prt_pop();
 
     // Write request body to file
     write_to_file_span(j.s, req_filename, 0);
@@ -506,6 +574,12 @@ The HTTP request body as a JSON object has already been written into the req fil
 
 We handle the communication by calling curl.
 We put the binary name in a span, either state->curlbin, or just "curl" if that is empty.
+If state->model is "llama.cpp" then we set is_gpt to 0, which we will use in a couple places.
+
+If we are in gpt mode, we need the openai key.
+If the openai_key is empty, we return a network_ret with success = 0 and .error of "No API key provided.".
+Otherwise we are using a llama.cpp model and the key doesn't matter so we can use "[unused]".
+We put this in a span and include the header all the same; the llama.cpp server will ignore it and it simplifies the code.
 
 Next we construct a curl command.
 
@@ -520,49 +594,59 @@ We need to tell curl:
 
 We put the command together with snprintf.
 As always, to print any span x we use `%.*s`, with corresponding arguments len(x) and x.buf.
+Make everything a span before calling snprintf so that this is easier.
 
 Don't forget to quote HTTP headers when composing the curl command with -H to protect them from being split by the shell.
 
 Our return value is a network_ret, declared above, which either has success = 1 and the .response contains the body of the API response or success = 0 and .error contains a human-readable error message.
 
-If the openai_key is empty, we report this on .error and return a network_ret with success = 0.
-
 We read the contents of the resp file with read_file_into_cmp and set this on .response.
 If the curl command returned non-zero, we also read the contents of the err file into .err.
 We always read the resp file, even in cases of error.
 
-API endpoint: "https://api.openai.com/v1/chat/completions"
+API endpoint for gpt: "https://api.openai.com/v1/chat/completions"
+for llama.cpp: "http://localhost:8080/v1/chat/completions"
+
+Notes:
+
+Prefer span functions to C strings.
+Never write const in C.
+Use the %.*s, len(x), x.buf pattern when using a span with a format string.
+DO NOT EVER write %.*s, len(x) and s(x); use x.buf directly, where x is any span.
 */
 
 network_ret call_gpt_curl(span req, span resp, span err) {
-    char cmd[1024];
-    if (empty(state->openai_key)) {
-        return (network_ret){0, nullspan(), S("No API key provided.")};
+    span curl_cmd = S("curl");
+    if (!empty(state->curlbin)) {
+        curl_cmd = state->curlbin;
     }
 
-    char *curl_bin = empty(state->curlbin) ? "curl" : s(state->curlbin);
-    snprintf(cmd, sizeof(cmd), 
-        "%s -sS -X POST -H \"Content-Type: application/json\" -H \"Authorization: Bearer %.*s\" "
-        "-d @%.*s --output %.*s --url https://api.openai.com/v1/chat/completions 2>%.*s", 
-        curl_bin, 
-        len(state->openai_key), state->openai_key.buf, 
-        len(req), req.buf, 
-        len(resp), resp.buf, 
-        len(err), err.buf
-    );
+    int is_gpt = !span_eq(state->model, S("llama.cpp"));
+    span api_key = is_gpt ? state->openai_key : S("[unused]");
+    if (is_gpt && empty(api_key)) {
+        return (network_ret){.success = 0, .error = S("No API key provided.")};
+    }
 
-    int result = system(cmd);
-    network_ret net_result;
-    net_result.response = read_file_into_cmp(resp);
+    span content_type = S("Content-Type: application/json");
+    span auth_header = prs("Authorization: Bearer %.*s", len(api_key), api_key.buf);
+    span endpoint = is_gpt ? S("https://api.openai.com/v1/chat/completions") : S("http://localhost:8080/v1/chat/completions");
+
+    char cmd_buf[1024];
+    snprintf(cmd_buf, sizeof(cmd_buf), 
+        "%.*s -sS -d @%.*s -H \"%.*s\" -H \"%.*s\" -o %.*s %.*s 2>%.*s",
+        len(curl_cmd), curl_cmd.buf, len(req), req.buf, len(content_type), content_type.buf,
+        len(auth_header), auth_header.buf, len(resp), resp.buf, len(endpoint), endpoint.buf, len(err), err.buf);
+
+    int result = system(cmd_buf);
+    span response = read_file_into_cmp(resp);
+    network_ret ret = {.success = 1, .response = response};
 
     if (result != 0) {
-        net_result.success = 0;
-        net_result.error = read_file_into_cmp(err);
-    } else {
-        net_result.success = 1;
+        ret.success = 0;
+        ret.error = read_file_into_cmp(err);
     }
 
-    return net_result;
+    return ret;
 }
 
 /* #call_ollama
@@ -572,9 +656,9 @@ Here we talk to an Ollama local model via the API.
 We are given a json which contains an array of messages, and a span which contains a model string, and return a network_ret.
 
 We set up a json object for the message body.
-We use prt2cmp() so that the json object will be written to cmp space.
+We use prt_cmp() so that the json object will be written to cmp space.
 Using the json api functions, we make a json object j and extend it with "messages" as the messages, with "model" as json_s of the model string, and with "stream" set to "false".
-Then we go back to normal with prt2std().
+Then we go back to normal with prt_pop().
 
 We will write the request body and response or error to disk, so first we set up three filenames.
 The filename is <cmprdir>/api_calls/<timestamp>-{req,resp,err} where cmprdir comes from state and the timestamp is in the current time in the format YYYYMMDD-hhmmss.
@@ -582,16 +666,16 @@ To construct the three filenames (-req, -resp, and -err) we set up a base filena
 
 We write the request body j.s to disk, without clobbering as it should not exist, then we call call_ollama_curl to handle the HTTP request, passing in the three filename spans, and we return what it returns.
 
-Functions: clock_gettime, strftime, prt2cmp, json_o, json_o_extend, json_o, S, json_b, prt2std, prs, len, concat, write_to_file_span, call_ollama_curl
+Functions: clock_gettime, strftime, prt_cmp, json_o, json_o_extend, json_o, S, json_b, prt_pop, prs, len, concat, write_to_file_span, call_ollama_curl
 */
 
 network_ret call_ollama(json messages, span model) {
-    prt2cmp();
+    //prt_cmp();
     json j = json_o();
     json_o_extend(&j, S("messages"), messages);
     json_o_extend(&j, S("model"), json_s(model));
     json_o_extend(&j, S("stream"), json_b(0));
-    prt2std();
+    //prt_pop();
 
     struct timespec ts;
     clock_gettime(CLOCK_REALTIME, &ts);
@@ -832,7 +916,7 @@ void handle_args(int argc, char **argv) {
             ind_conf = 1;
         } else if (strcmp(argv[i], "--print-conf") == 0) {
             ind_print_conf = 1;
-            action_arg = 1;
+            //action_arg = 1;
         } else if (strcmp(argv[i], "--help") == 0) {
             ind_help = 1;
             action_arg = 1;
@@ -889,7 +973,9 @@ void handle_args(int argc, char **argv) {
             prt("Error: --print-block, --print-comment, --print-code, --find-block, and --count-blocks cannot be combined.\n");
             flush_exit(1);
         }
-        get_code();
+        if (ind_print_block + ind_print_comment + ind_print_code + ind_find_block + ind_count_blocks) {
+          get_code();
+        }
         if (ind_print_block) {
             print_block(block_index);
             flush_exit(0);
@@ -911,7 +997,7 @@ void handle_args(int argc, char **argv) {
     }
 }
 
-/*
+/* #clear_display
 In clear_display() we clear the terminal by printing some escape codes (with prt and flush as usual).
 */
 
@@ -940,7 +1026,7 @@ If this sanity check fails, we complain and crash as usual (prt, flush, exit).
 
 void block_sanity_check(span file, spans blocks) {
     if (empty(file)) {
-        if (blocks.n != 1 || !empty(blocks.s[0])) {
+        if (blocks.n != 1 || !empty(blocks.a[0])) {
             prt("Error: Empty file must have exactly one empty block.\n");
             flush();
             exit(EXIT_FAILURE);
@@ -949,14 +1035,14 @@ void block_sanity_check(span file, spans blocks) {
     }
 
     // Check if the first block begins where the input span begins
-    if (blocks.s[0].buf != file.buf) {
+    if (blocks.a[0].buf != file.buf) {
         prt("Error: The first block does not start where input begins.\n");
         flush();
         exit(EXIT_FAILURE);
     }
 
     // Check if the last block ends where the input ends
-    if (blocks.s[blocks.n - 1].end != file.end) {
+    if (blocks.a[blocks.n - 1].end != file.end) {
         prt("Error: The last block does not end where input ends.\n");
         flush();
         exit(EXIT_FAILURE);
@@ -964,7 +1050,7 @@ void block_sanity_check(span file, spans blocks) {
 
     // Ensure all blocks tile the file and none are empty
     for (int i = 1; i < blocks.n; ++i) {
-        if (blocks.s[i].buf != blocks.s[i - 1].end || empty(blocks.s[i])) {
+        if (blocks.a[i].buf != blocks.a[i - 1].end || empty(blocks.a[i])) {
             prt("Error: Blocks do not properly tile the file or a block is empty.\n");
             flush();
             exit(EXIT_FAILURE);
@@ -972,7 +1058,8 @@ void block_sanity_check(span file, spans blocks) {
     }
 }
 
-/*
+/* #find_all_blocks
+
 In find_all_blocks, we find the blocks in each file.
 
 We are going to need to know how many blocks there are in all the files, and to store all of the blocks so that we can allocate a single spans to hold all of them at the end.
@@ -1000,15 +1087,42 @@ void find_all_blocks() {
     }
 
     spans all_blocks = spans_alloc(total_blocks);
-    size_t index = 0;
+    //size_t index = 0;
     for (int i = 0; i < state->files.n; ++i) {
         for (int j = 0; j < file_blocks[i].n; ++j) {
-            all_blocks.s[index++] = file_blocks[i].s[j];
+            //all_blocks.a[index++] = file_blocks[i].a[j];
+            spans_push(&all_blocks,(file_blocks[i].a[j]));
         }
     }
 
     state->blocks = all_blocks;
     free(file_blocks);
+}
+/* #find_all_lines
+
+Similar to find_all_blocks, but much simpler.
+
+All the files have been read into inp, so we simply need to iterate over it once, count all the lines, allocate a lines spans and then iterate again and populate it.
+
+We can make a copy of inp and use next_line once to count the lines, and then the next time to populate state->lines.
+Note that next_line doesn't include the newline, so while our blocks tile the input, our lines index has gaps of one byte between each line and the next.
+*/
+
+void find_all_lines() {
+    span input_copy = inp;
+    int line_count = 0;
+    
+    while (!empty(input_copy)) {
+        next_line(&input_copy);
+        line_count++;
+    }
+
+    state->lines = spans_alloc(line_count);
+    input_copy = inp;
+
+    for (int i = 0; i < line_count; i++) {
+        spans_push(&state->lines, next_line(&input_copy));
+    }
 }
 
 /* #selected_checksum
@@ -1034,18 +1148,21 @@ The key is "ABCDEFGHIJKLMNOP".
 
 Our output is a u64.
 We pass a pointer to this int into siphash.
+We return this wrapped in our checksum struct.
 */
 
-u64 selected_checksum(span input) {
+checksum selected_checksum(span input) {
     static const char key[16] = "ABCDEFGHIJKLMNOP";
     u64 result;
     siphash(input.buf, len(input), key, (uint8_t*)&result, sizeof(result));
-    return result;
+    return (checksum){result};
 }
 
-/* #checksum_blocks
+/* old checksum_blocks
 
 Here we iterate over all the blocks and find a checksum for each one.
+
+We do the same for all files and all lines.
 
 We run the checksum on each block by calling selected_checksum on each span and printing the results with prt.
 
@@ -1055,15 +1172,84 @@ We prompt the user to hit any key, then flush and getch() so the output can be r
 */
 
 void checksum_blocks() {
-    /*
     for (int i = 0; i < state->blocks.n; i++) {
-        long checksum = selected_checksum(state->blocks.s[i]);
-        prt("%d %lX\n", i + 1, checksum);
+        checksum cksum = selected_checksum(state->blocks.a[i]);
+        prt("%d %lX\n", i + 1, cksum);
     }
     prt("Press any key to continue...");
     flush();
     getch();
-    */
+}
+
+/* #checksum_code @ingest_functions:code
+
+Here we iterate over all the blocks and find a checksum for each one.
+We do the same for all files and all lines.
+
+For the lines and blocks, we put the checksums on the corresponding variables on state.
+For the files, we put the checksum on the projfile for the file on state.
+
+The checksums arrays on state for the lines and blocks have not been allocated yet.
+So we use checksums_alloc to set them up, taking the size (.n) from the corresponding spans on state.
+
+In each of these three loops, we also do something to let the user see the progress, as this may take some seconds.
+First, before entering each loop, we clear the screen, then we print the number of things we have to scan, e.g. "Hashing N Files".
+Then, every 16 iterations through the loop, we print on the line below that our progress as "n/N" where n is the current index and N is the total.
+We use terminal escape codes to make sure this always starts flush left, at the beginning of the current line (NOT at the top left of the screen, as that would overwrite the first line of output), and use prt and flush as usual, but without a terminating newline, so that we stay on the same line.
+*/
+
+void checksum_code() {
+    // Allocate checksums for blocks and lines
+    state->block_cksums = checksums_alloc(state->blocks.n);
+    state->line_cksums = checksums_alloc(state->lines.n);
+
+    // Clear screen and print message for files
+    prt("\033[2J\033[HHashing %d Files\n", state->files.n);
+    flush();
+
+    // Iterate over files
+    for (int i = 0; i < state->files.n; i++) {
+        // Calculate checksum for the file
+        state->files.a[i].cksum = selected_checksum(state->files.a[i].contents);
+
+        // Progress indication
+        if (i % 16 == 0) {
+            prt("\033[G%d/%d", i, state->files.n);
+            flush();
+        }
+    }
+
+    // Clear screen and print message for blocks
+    prt("\033[2J\033[HHashing %d Blocks\n", state->blocks.n);
+    flush();
+
+    // Iterate over blocks
+    for (int i = 0; i < state->blocks.n; i++) {
+        // Calculate checksum for the block
+        state->block_cksums.a[i] = selected_checksum(state->blocks.a[i]);
+
+        // Progress indication
+        if (i % 16 == 0) {
+            prt("\033[G%d/%d", i, state->blocks.n);
+            flush();
+        }
+    }
+
+    // Clear screen and print message for lines
+    prt("\033[2J\033[HHashing %d Lines\n", state->lines.n);
+    flush();
+
+    // Iterate over lines
+    for (int i = 0; i < state->lines.n; i++) {
+        // Calculate checksum for the line
+        state->line_cksums.a[i] = selected_checksum(state->lines.a[i]);
+
+        // Progress indication
+        if (i % 16 == 0) {
+            prt("\033[G%d/%d", i, state->lines.n);
+            flush();
+        }
+    }
 }
 
 /* #get_code
@@ -1077,7 +1263,7 @@ For each of the projfiles:
 
 Then we call find_all_blocks(), which sets up the blocks according to each file's contents and language.
 
-We call checksum_blocks() which additionally checksums each block.
+We call checksum_blocks() which additionally checksums each block, line, and file.
 */
 
 void get_code() {
@@ -1087,7 +1273,8 @@ void get_code() {
     }
 
     find_all_blocks();
-    checksum_blocks();
+    find_all_lines();
+    checksum_code();
 }
 
 /*
@@ -1184,27 +1371,28 @@ spans find_blocks_language_python(span file) {
             if (previous_block != NULL) {
                 previous_block->end = line.buf;
             }
-            blocks.s[index].buf = line.buf;
-            previous_block = &blocks.s[index++];
+            blocks.a[index].buf = line.buf;
+            previous_block = &blocks.a[index++];
         }
     }
     if (previous_block != NULL) {
         previous_block->end = file.end;
     }
+    blocks.n = index;
 
     // Sanity check
     for (int i = 0; i < blocks.n; ++i) {
-        if (i == 0 && blocks.s[i].buf != file.buf) {
+        if (i == 0 && blocks.a[i].buf != file.buf) {
             prt("Error: First block does not start where input begins.\n");
             flush();
             exit(EXIT_FAILURE);
         }
-        if (i == blocks.n - 1 && blocks.s[i].end != file.end) {
+        if (i == blocks.n - 1 && blocks.a[i].end != file.end) {
             prt("Error: Last block does not end where input ends.\n");
             flush();
             exit(EXIT_FAILURE);
         }
-        if (i > 0 && blocks.s[i].buf != blocks.s[i - 1].end) {
+        if (i > 0 && blocks.a[i].buf != blocks.a[i - 1].end) {
             prt("Error: Block start does not match previous block end.\n");
             flush();
             exit(EXIT_FAILURE);
@@ -1248,8 +1436,9 @@ spans find_blocks_language_c(span file) {
     if (empty(file)) {
         // Handle special case for empty file
         spans single_empty_block = spans_alloc(1);
-        single_empty_block.s[0].buf = file.buf;
-        single_empty_block.s[0].end = file.end;
+        single_empty_block.a[0].buf = file.buf;
+        single_empty_block.a[0].end = file.end;
+        single_empty_block.n = 1;
         return single_empty_block;
     }
 
@@ -1279,18 +1468,95 @@ spans find_blocks_language_c(span file) {
             if (previous_block != NULL) {
                 previous_block->end = line.buf;
             }
-            blocks.s[index].buf = line.buf;
-            previous_block = &blocks.s[index++];
+            blocks.a[index].buf = line.buf;
+            previous_block = &blocks.a[index++];
             is_first_line = 0;
         }
     }
     if (previous_block != NULL) {
         previous_block->end = file.end;
     }
+    blocks.n = index;
 
     return blocks;
 }
+
 /*
+In find_blocks_language_markdown, we get a span containing a file.
+
+We write two loops.
+In the first one we count the blocks, then we spans_alloc our return value with the correct number, and in the second loop we assign the spans.
+
+For a Markdown file, a block starts with any heading, which we define as a line starting with a "#" flush left.
+It ends where the next block starts.
+
+There are some special cases:
+
+If the file is empty, we return a single empty block.
+We handle this as a special case, since it doesn't really work with our two-loop approach.
+We also care about where the blocks are, even if they are empty, so in this case we ensure that the empty block we return is the same as the empty span of the file itself (i.e. .buf and .end are equal to each other, and to those of the file: we can NOT use nullspan() here).
+
+If a file does not begin with a block, then the first block will just be from the beginning of the file to the first "block" proper.
+For markdown, this means that if the file doesn't begin with a heading, the first block will be everything before the first heading.
+
+The last block always goes to the end of the file.
+
+Before the first loop we copy our argument into a new span `copy` so that we can consume it while counting, but then still have access to the original full span for the second loop.
+
+The block-finding loop:
+- While the remaining input is not empty, we get the next line. (Note that next_line will return everything left if there is no newline).
+- If this line starts with the pattern, or if it is the first line in the file, then it begins a block (regardless of whether the line is empty), otherwise we simply do nothing and continue the loop.
+- If we are counting blocks, we increment our counter, otherwise we assign .buf of a span for this block, and if we had a previous block, we assign .end of that block to the same offset.
+- When we reach the end of the input we will assign .end of the last block to the end of the input.
+
+(To determine if we are at the start of the input, we can compare .buf of the line with that of the input.)
+*/
+
+spans find_blocks_language_markdown(span file) {
+    if (empty(file)) {
+        spans result = spans_alloc(1);
+        result.a[0] = file;
+        result.n = 1;
+        return result;
+    }
+    
+    span copy = file;
+    int block_count = 0;
+    
+    while (!empty(copy)) {
+        span line = next_line(&copy);
+        if (line.buf == file.buf || *line.buf == '#') {
+            block_count++;
+        }
+    }
+    
+    spans blocks = spans_alloc(block_count);
+    copy = file;
+    int index = 0;
+    span* prev_block = NULL;
+    
+    while (!empty(copy)) {
+        span line = next_line(&copy);
+        if (line.buf == file.buf || *line.buf == '#') {
+            if (prev_block != NULL) {
+                prev_block->end = line.buf;
+            }
+            blocks.a[index].buf = line.buf;
+            prev_block = &blocks.a[index];
+            index++;
+        }
+    }
+    
+    if (prev_block != NULL) {
+        prev_block->end = file.end;
+    }
+    
+    blocks.n = index;
+    return blocks;
+}
+
+/* #find_blocks_language @langtable
+
 In `spans find_blocks_language(span,span)`, we take a span (a file's contents) and a language, which is any of the supported languages.
 
 We dispatch to another function that handles that language appropriately, and return the resulting spans.
@@ -1300,21 +1566,24 @@ We dispatch according to the "find blocks by language" implementation given by #
 If the language is not known, we prt, flush, exit as per usual.
 */
 
-spans find_blocks_language(span file, span language) {
+spans find_blocks_language(span file_contents, span language) {
     if (span_eq(language, S("C"))) {
-        return find_blocks_language_c(file);
+        return find_blocks_language_c(file_contents);
     } else if (span_eq(language, S("Python"))) {
-        return find_blocks_language_python(file);
+        return find_blocks_language_python(file_contents);
     } else if (span_eq(language, S("JavaScript"))) {
-        return find_blocks_language_c(file); // JavaScript uses the same rule as C for finding blocks.
+        return find_blocks_language_c(file_contents);  // Note: JavaScript uses C rules.
+    } else if (span_eq(language, S("Markdown"))) {
+        return find_blocks_language_markdown(file_contents);
     } else {
-        prt("Error: Unsupported language '%.*s'.\n", len(language), language.buf);
+        prt("Error: Unsupported language.");
         flush();
         exit(1);
     }
 }
+
 /*
-Function to read a single character without echoing it to the terminal.
+Function getch to read a single character without echoing it to the terminal.
 */
 
 char getch(void) {
@@ -1331,28 +1600,6 @@ char getch(void) {
   if (tcsetattr(0, TCSADRAIN, &old) < 0) perror("tcsetattr ~ICANON");
 
   return buf;
-}
-
-/*
-In reset_stdin_to_terminal, we use the technique of opening /dev/tty for direct keyboard input with dup2 to essentially "reset" stdin to the terminal, even if it was originally redirected from a file.
-This approach allows us to switch back to reading from the terminal without having to specifically manage a separate file descriptor for /dev/tty in the rest of the program.
-First we open the terminal device, dup2 to stdin (fd 0), and finally close the tty fd as it's no longer needed.
-*/
-
-void reset_stdin_to_terminal() {
-  int tty_fd = open("/dev/tty", O_RDONLY);
-  if (tty_fd < 0) {
-    perror("Failed to open /dev/tty");
-    exit(EXIT_FAILURE);
-  }
-
-  if (dup2(tty_fd, STDIN_FILENO) < 0) {
-    perror("Failed to duplicate /dev/tty to stdin");
-    close(tty_fd);
-    exit(EXIT_FAILURE);
-  }
-
-  close(tty_fd);
 }
 
 /* #main_loop
@@ -1374,10 +1621,6 @@ We also define a helper function print_current_blocks; we include just the decla
 Once we have a keystroke, we will call another function, handle_keystroke, which takes the char that was entered.
 */
 
-void check_conf_vars();
-void print_current_blocks();
-void handle_keystroke(char keystroke);
-
 void main_loop() {
     state->current_index = 0;
     state->marked_index = -1;
@@ -1393,7 +1636,7 @@ void main_loop() {
         handle_keystroke(input); // Handle the input keystroke
     }
 }
-/* span count_physical_lines(span, int*)
+/* #count_physical_lines
 
 In this function we are given a span and a (pointer to a) maximum number of physical lines to print or count.
 
@@ -1469,7 +1712,7 @@ The page_up function is a bit simpler, as we can always unconditionally scroll u
 void page_down() {
     int lines_to_skip = state->scrolled_lines;
     int content_rows = state->terminal_rows - 2;
-    span block_copy = state->blocks.s[state->current_index];
+    span block_copy = state->blocks.a[state->current_index];
     span scrolled_off = count_physical_lines(block_copy, &lines_to_skip);
 
     block_copy.buf = scrolled_off.end;
@@ -1481,7 +1724,7 @@ void page_down() {
     } else {
         state->scrolled_lines += content_rows;
         lines_to_skip = state->scrolled_lines;
-        block_copy = state->blocks.s[state->current_index];
+        block_copy = state->blocks.a[state->current_index];
         scrolled_off = count_physical_lines(block_copy, &lines_to_skip);
 
         /* *** manual fixup *** */
@@ -1501,19 +1744,6 @@ void page_up() {
         state->scrolled_lines = 0;
     }
 }
-/* Helper function to print the first n lines of a block. */
-
-void print_first_n_lines(span block, int n) {
-  int line_count = 0;
-  span copy = block; // Make a copy to avoid modifying the original span
-  while (!empty(copy) && line_count < n) {
-    span line = next_line(&copy);
-    wrs(line); // Write the line to the output span
-    terpri();  // Append a newline character
-    line_count++;
-  }
-}
-
 /*
 In toggle_visual, we test if we are in visual selection mode.
 If the marked index is not -1 then we are in visual mode, and we leave the mode (by setting it to -1).
@@ -1558,8 +1788,6 @@ void get_screen_dimensions() {
   state->terminal_rows = w.ws_row;
   state->terminal_cols = w.ws_col;
 }
-
-void render_block_range(int, int);
 
 void print_current_blocks() {
   get_screen_dimensions();
@@ -1866,19 +2094,17 @@ void start_ex() {
     handle_ex_command();
 }
 
-/* #extable #handle_ex_command
-
-Once the ex_command on the state is set up, this function actually handles it, and clears ex_command to leave ex command entry mode.
+/* #extable
 
 The ex commands are defined as a table:
 
 1. Supported ex commands:
 
-:bootstrap, :addfile, :addlib, :help, :model
+:bootstrap, :config, :addfile, :addlib, :allfiles, :help, :model, :expandrefs
 
 2. Implementation functions:
 
-bootstrap(), addfile(span), addlib(span), ex_help(), select_model()
+bootstrap(), addfile(span), addlib(span), ex_help(), select_model(), ex_expandrefs()
 
 3. Arguments:
 
@@ -1891,16 +2117,29 @@ all others:
 4. Help text:
 
 bootstrap:
-  Run the user-provided bootstrap command.
+  Run the user-provided bootstrap command, putting the result on the clipboard.
+
+config:
+  Edit and reload the config file.
 
 addfile, addlib:
   Add a file or library to the project (adds file: or lib: line to conf).
+
+allfiles:
+  Adds all the files in the project directory to the conf file.
 
 help:
   Print short help on available ex commands.
 
 model:
   Select the LLM to use for "r" and other commands.
+
+expandrefs:
+  Expands block references and displays the expanded result.
+*/
+/* #handle_ex_command @extable
+
+Once the ex_command on the state is set up, this function actually handles it, and clears ex_command to leave ex command entry mode.
 */
 
 // stubbed for now (manually)
@@ -1920,26 +2159,29 @@ void handle_ex_command() {
         ex_help();
     } else if (starts_with(state->ex_command, S(":model"))) {
         select_model();
+    } else if (span_eq(state->ex_command, S(":expandrefs"))) {
+        ex_expandrefs();
     }
     state->ex_command = nullspan();
 }
 /* #ex_help @extable
 
-In ex_help we print a short help for each of the ex commands given in #extable above.
+In ex_help we print the help messages given in #extable Col. 4 above.
 
--- start with newline
+Start with a newline, as the cursor will still be on the ex command line (from :help).
 
-We flush and then getch() so the user can see it before returning to the main loop (we prompt the user about this).
-
+We flush and then getch() so the user can see it before returning to the main loop.
+We prompt the user with "Press any key to continue...".
 */
 
 void ex_help() {
-    prt("\nCommands available:\n");
-    prt(":bootstrap - %s\n", "Run the user-provided bootstrap command.");
-    //prt(":addfile <path> - %s\n", "Add a file to the project (adds file: line to conf).");
-    //prt(":addlib <path> - %s\n", "Add a library to the project (adds lib: line to conf).");
-    prt(":help - %s\n", "Print short help on available ex commands.");
-    prt(":model - %s\n", "Select the LLM to use for 'r' and other commands.");
+    prt("\nbootstrap: Run the user-provided bootstrap command, putting the result on the clipboard.\n");
+    //prt("config: Edit and reload the config file.\n");
+    //prt("addfile, addlib: Add a file or library to the project (adds file: or lib: line to conf).\n");
+    //prt("allfiles: Adds all the files in the project directory to the conf file.\n");
+    prt("help: Print short help on available ex commands.\n");
+    prt("model: Select the LLM to use for \"r\" and other commands.\n");
+    prt("expandrefs: Expands block references and displays the expanded result.\n");
     flush();
     prt("Press any key to continue...");
     flush();
@@ -1961,7 +2203,7 @@ void reset_highlight() {
 
 /* #print_menu
 
-Here we show the user a list of a small number options, with the currently selected one highlighted.
+Here we show the user a list of a small number of options, with the currently selected one highlighted.
 
 Our arguments are a spans containing the options and a currently selected index into it.
 
@@ -1969,7 +2211,7 @@ We clear the display, print the options, highlighting the selected one, and then
 
 "Use j/k or Up/Down to move and Enter to select."
 
-We have helper functions to set and reset highlighting and to clear the display.
+@set_highlight
 */
 
 void print_menu(spans options, int selected_index) {
@@ -1978,10 +2220,10 @@ void print_menu(spans options, int selected_index) {
     for (int i = 0; i < options.n; ++i) {
         if (i == selected_index) {
             set_highlight();
-            prt("%.*s\n", len(options.s[i]), options.s[i].buf);
+            prt("%.*s\n", len(options.a[i]), options.a[i].buf);
             reset_highlight();
         } else {
-            prt("%.*s\n", len(options.s[i]), options.s[i].buf);
+            prt("%.*s\n", len(options.a[i]), options.a[i].buf);
         }
     }
 
@@ -2058,34 +2300,44 @@ Here we allow the user to select the model.
 
 We set up a spans and the currently selected index and then call select_menu.
 
-Currently the list is hardcoded to "gpt-3.5-turbo" and "gpt-4-turbo" and "clipboard".
+The list of models:
 
-When we enter the function, if state->model is unset we set it to "clipboard" as the default.
+- "gpt-3.5-turbo"
+- "gpt-4-turbo"
+- "llama.cpp"
+- all ollama models listed in state->ollama_models
+- "clipboard"
 
 The initially selected option should be the one that matches state->model.
 
 When select_menu returns we update state->model and call save_conf to store any change back to the conf file.
 
-Recall that we never, ever write "const" in C.
+We can avoid leaking spans arena memory with the appropriate _push and _pop functions around the entire function body.
 */
 
 void select_model() {
-    span models[] = {S("gpt-3.5-turbo"), S("gpt-4-turbo"), S("clipboard")};
-    spans model_spans = {models, 3};
-    int selected_index = 2; // default to "clipboard"
+    spans_arena_push();
 
-    if (!empty(state->model)) {
-        for (int i = 0; i < model_spans.n; i++) {
-            if (span_eq(model_spans.s[i], state->model)) {
-                selected_index = i;
-                break;
-            }
-        }
+    spans models = spans_alloc(5 + state->ollama_models.n);
+    assert(models.n==0);
+    spans_push(&models,S("gpt-3.5-turbo"));
+    spans_push(&models,S("gpt-4-turbo"));
+    spans_push(&models,S("llama.cpp"));
+    for (int i = 0; i < state->ollama_models.n; i++) {
+        spans_push(&models,state->ollama_models.a[i]);
+    }
+    spans_push(&models,S("clipboard"));
+
+    int current_index = index_of(state->model, models);
+    if (current_index == -1) current_index = 0;
+
+    int selected_index = select_menu(models, current_index);
+    if (selected_index != current_index) {
+        state->model = models.a[selected_index];
+        save_conf();
     }
 
-    selected_index = select_menu(model_spans, selected_index);
-    state->model = model_spans.s[selected_index];
-    save_conf();
+    spans_arena_pop();
 }
 
 /* #bootstrap
@@ -2158,7 +2410,7 @@ void perform_search() {
     span first_match_span = nullspan();
 
     for (int i = 0; i < state->blocks.n; i++) {
-        span match = spanspan(state->blocks.s[i], search_span);
+        span match = spanspan(state->blocks.a[i], search_span);
         if (!empty(match) || empty(search_span)) {
             if (first_match_index == -1) {
                 first_match_index = i;
@@ -2175,7 +2427,7 @@ void perform_search() {
         remaining_lines -= 1;
 
         int initial_lines_to_print = (remaining_lines - 8) / 2;
-        print_physical_lines(state->blocks.s[first_match_index], initial_lines_to_print);
+        print_physical_lines(state->blocks.a[first_match_index], initial_lines_to_print);
         remaining_lines -= initial_lines_to_print;
 
         prt("\n");
@@ -2184,7 +2436,7 @@ void perform_search() {
         prt("Match:\n");
         remaining_lines -= 1;
 
-        int lines_printed = print_matching_physical_lines(state->blocks.s[first_match_index], first_match_span);
+        int lines_printed = print_matching_physical_lines(state->blocks.a[first_match_index], first_match_span);
         remaining_lines -= lines_printed;
 
         prt("\n");
@@ -2202,39 +2454,6 @@ void perform_search() {
     wrs(state->search);
     flush();
 }
-/*
-In next_line_limit(span* s, int n) we are given a span and a length limit.
-We return a span which is a prefix of s.
-If the first n characters do not contain newline, and the n+1th character is also not a newline, then we return a span, not ending in newline, of n characters.
-If the first n characters do not contain newline but n+1 does, we include n+1 characters, including the newline.
-Otherwise, there is a newline within the first n characters, we return n or fewer characters with the last one being the newline.
-We also set s->buf to contain the rest of the span not in the returned prefix.
-*/
-
-span next_line_limit(span* s, int n) {
-    span result = {s->buf, s->buf}; // Initialize result span to start of input span
-    if (s->buf == NULL || n <= 0) return result; // Check for null pointer or non-positive length
-
-    int i;
-    for (i = 0; i < n && (s->buf + i) < s->end; i++) {
-        if (s->buf[i] == '\n') {
-            result.end = s->buf + i + 1; // Include the newline in the result
-            break;
-        }
-    }
-
-    if (i == n) { // Reached the length limit without encountering a newline
-        if ((s->buf + n) < s->end && s->buf[n] == '\n') {
-            result.end = s->buf + n + 1; // Include the next character if it is a newline
-        } else {
-            result.end = s->buf + n; // Just include up to the limit
-        }
-    }
-
-    s->buf = result.end; // Advance the start of the input span past the returned prefix
-    return result;
-}
-
 /* #print_ruler
 
 In print_ruler we use prt to show
@@ -2252,7 +2471,7 @@ Our output reads as "Block n/N, Line L, File <path>, Model <model>, ? for help",
 */
 
 void print_ruler() {
-    span current_block = state->blocks.s[state->current_index];
+    span current_block = state->blocks.a[state->current_index];
     int file_index = file_for_block(current_block);
     projfile current_file = state->files.a[file_index];
     char path_buf[2048] = {0}; // Assuming path lengths won't exceed 2047 characters + null terminator
@@ -2260,7 +2479,8 @@ void print_ruler() {
 
     prt("Block %d/%d, Line %d, File %s, Model: %.*s, ? for help", state->current_index + 1, state->blocks.n, state->scrolled_lines + 1, path_buf, len(state->model), state->model);
 }
-/*
+/* #print_single_block_with_skipping
+
 In print_single_block_with_skipping we get a block index and a pagination index in the form of a number of lines already "scrolled off" above the top of the screen (skipped_lines).
 
 First, we call count_physical_lines, which gives us a span of skipped lines and alters an int, subtracting the number of physical lines which this span represents.
@@ -2277,7 +2497,7 @@ Finally, we call print_ruler to handle the last line of the terminal.
 */
 
 void print_single_block_with_skipping(int block_index, int skipped_lines) {
-    span block = state->blocks.s[block_index];
+    span block = state->blocks.a[block_index];
     int physical_lines = skipped_lines;
     span skipped_span = count_physical_lines(block, &physical_lines);
     span block_suffix = block;
@@ -2403,7 +2623,7 @@ void finalize_search() {
     span search_term = skip_n(state->search, 1); // Skip the slash
     int found = -1;
     for (int i = 0; i < state->blocks.n && found == -1; i++) {
-        if (contains(state->blocks.s[i], search_term)) {
+        if (contains(state->blocks.a[i], search_term)) {
             found = i;
         }
     }
@@ -2437,7 +2657,7 @@ void search_forward() {
     span search_term = skip_n(state->previous_search, 1);
     int match_index = -1;
     for (int i = 0; i < state->blocks.n; ++i) {
-        if (i > state->current_index && contains(state->blocks.s[i], search_term)) {
+        if (i > state->current_index && contains(state->blocks.a[i], search_term)) {
             match_index = i;
             break;
         }
@@ -2452,7 +2672,7 @@ void search_backward() {
     span search_term = skip_n(state->previous_search, 1);
     int match_index = -1;
     for (int i = state->blocks.n - 1; i >= 0; --i) {
-        if (i < state->current_index && contains(state->blocks.s[i], search_term)) {
+        if (i < state->current_index && contains(state->blocks.a[i], search_term)) {
             match_index = i;
             break;
         }
@@ -2505,8 +2725,9 @@ void handle_conf_file(span file_path) {
     projfiles_push(&state->files, file);
 }
 
-/*
-In the first function, parse_config, we read the contents of our config file (at state->config_file_path) into the cmp space, parse it, and set on the ui_state all the appropriate values.
+/* #parse_config
+
+In parse_config, we read the contents of our config file (at state->config_file_path) into the cmp space, parse it, and set on the ui_state all the appropriate values.
 
 We have a library method cmp_compl() which gives us the complement of cmp in cmp_space, which is the space that we can safely read into.
 We'll read our configuration file into that space with read_file_S_into_span().
@@ -2532,6 +2753,8 @@ These are:
 - file
 
 These are handled by custom code, so we have functions handle_conf_{language,file} (already written above) that we call with the value span for either of these each time they occur in the config file.
+
+Finally we call a function split_comma_ws to populate state->ollama_models from state->ollamas.
 */
 
 void parse_config() {
@@ -2566,6 +2789,8 @@ void parse_config() {
             #undef X
         }
     }
+
+    state->ollama_models = split_commas_ws(state->ollamas);
 }
 /*
 In read_line, we get a span pointer to some space that we can use to store input from the user, and a default value.
@@ -2646,8 +2871,8 @@ Next, we will write that into the file named by state.config_file_path.
 Finally we can shorten the cmp space back to what it was.
 
 First we store a span that has .buf pointing to the current cmp.end.
-Then we call prt2cmp() and use prt to print a line for each config var as described below.
-Then we call prt2std().
+** Then we call prt_cmp() and use prt to print a line for each config var as described below.
+Then we call prt_pop().
 Next we set the .end of that span to be the current cmp.end.
 
 Then we call write_to_file_span with the span and the configuration file name.
@@ -2660,14 +2885,14 @@ Our X macro handles the "normal" config fields, but then we call another functio
 
 void save_conf() {
     span original_cmp_end = {cmp.end, cmp.end};
-    prt2cmp();
+    void *p = out2cmp();
 
     #define X(name) prt(#name ": %.*s\n", len(state->name), state->name.buf);
     CONFIG_FIELDS
     #undef X
 
     save_conf_files();
-    prt2std();
+    out_rst(p);
     original_cmp_end.end = cmp.end;
 
     write_to_file_span(original_cmp_end, state->config_file_path, 1);
@@ -2737,6 +2962,10 @@ void check_dirs() {
 
 /* #check_conf_vars
 
+TODO: this isn't the right way
+
+instead we should add the :config feature, :allfiles and add empty states that guide the user
+
 In check_conf_vars() we test the state for all essential configuration variables and if any is missing we prompt the user to set that.
 
 The essential configuration variables, along with the reason why each is required, are:
@@ -2752,7 +2981,7 @@ For each missing variable in the order given, we print the string after the colo
 We then call read_line to get the new value from the user.
 For the buffer space to use we will first call cmp_compl() to get the complement of cmp space as a span.
 After read_line returns we will always set cmp.end to point to the end of the RETURNED span; this makes sure nothing else uses that space later.
-NOTE: THIS MEANS THE VALUE THAT IS ****RETURNED**** BY THE READ_LINE FUNCTION.
+NOTE: this means the value that is ****returned**** by the read_line function.
 
 Additional to the "normal" conf vars, we also have the files, and the language setting for each file.
 
@@ -2776,6 +3005,16 @@ To handle all of this we declare some int indicator(s) at the top of the functio
 void check_conf_vars() {
     int confChanged = 0;
     span cmpComplement = cmp_compl();
+
+    /* manually added: */
+    if (empty(state->cmprdir)) {
+      state->cmprdir = S(".cmpr/");
+      confChanged = 1;
+    }
+    if (empty(state->model)) {
+      state->model = S("clipboard");
+      confChanged = 1;
+    }
 
     #define CHECK_SET(var, prompt, defaultValue) \
     if (empty(state->var)) { \
@@ -2867,7 +3106,7 @@ If not, we print a short message to let the user know their changes were ignored
 */
 
 void edit_current_block() {
-    span block = state->blocks.s[state->current_index];
+    span block = state->blocks.a[state->current_index];
     char* filename = s(tmp_filename());
     write_to_file_span(block, S(filename), 0);
     int editor_status = launch_editor(filename);
@@ -2880,7 +3119,7 @@ void edit_current_block() {
     }
 }
 
-/* #tmp_filename
+/* #tmp_filename @langtable
 To generate a tmp filename for launching the user's editor, we return a string starting with state->cmprdir followed by "/tmp/".
 For the filename part, we construct a timestamp in a compressed ISO 8601-like format, as YYYYMMDD-hhmmss with just a single dash as separator.
 We append a file extension: we use file_for_block and current_block to get the language for the current block and add the appropriate extension, switching on the language and adding the appropriate filename extension from #langtable above.
@@ -2913,7 +3152,8 @@ span tmp_filename() {
     return S(filename);
 }
 
-/*
+/* #launch_editor
+
 In launch_editor, we are given a filename and must launch the user's editor of choice on that file, and then wait for it to exit and return its exit code.
 
 We look in the env for an EDITOR environment variable and use that if it is present, otherwise we will use "vi".
@@ -2948,7 +3188,7 @@ int launch_editor(char* filename) {
         }
     }
 }
-/* int file_for_block(span)
+/* #file_for_block
 
 Here we're given the span of a block and we must find out the index of the file that contains that block.
 
@@ -2973,15 +3213,26 @@ int file_for_block(span block) {
 
 /* #current_block_language
 
-Here we get the currently selected block (state->current_index) and then get the file for that block (file_for_block()) and return the .language on the corresponding projfile on state->files.
+Here we get the currently selected block (state->current_index) and then use language_for_block to return the language for that block.
 */
 
 span current_block_language() {
-    int file_index = file_for_block(state->blocks.s[state->current_index]);
+    return language_for_block(state->blocks.a[state->current_index]);
+}
+
+/* #language_for_block
+
+We are given a span which is a block, and return the language for that block.
+
+We get the file for the block (file_for_block()) and return the .language on the corresponding projfile on state->files.
+*/
+
+span language_for_block(span block) {
+    int file_index = file_for_block(block);
     return state->files.a[file_index].language;
 }
 
-/* handle_edited_file
+/* #handle_edited_file
 
 Here we are given a tmp file containing new contents of a block.
 
@@ -3025,8 +3276,8 @@ This function is responsible for storing a new rev, cleaning up the tmp file, an
 */
 
 void handle_edited_file(char* filename) {
-    int file_index = file_for_block(state->blocks.s[state->current_index]);
-    span original_block = state->blocks.s[state->current_index];
+    int file_index = file_for_block(state->blocks.a[state->current_index]);
+    span original_block = state->blocks.a[state->current_index];
     int fd = open(filename, O_RDONLY);
     if (fd < 0) {
         prt("Error: Failed to open edited file.\n");
@@ -3166,7 +3417,7 @@ void update_projfile(int file_index, span tmp_filename, span rev_path) {
     }
 }
 
-/*
+/* #copy_file
 The copy_file function copies the contents from one file to another.
 It operates by opening the source file for reading and the destination file for writing.
 The function reads chunks of data into a buffer and writes them out to the destination file, handling potential interruptions due to signals.
@@ -3219,16 +3470,6 @@ int copy_file(const char *src, const char *dest) {
     }
 }
 
-/*
-SH_FN_START
-
-update_symlink() {
-  rm -r cmpr/cmpr.c; ln -s $(cd cmpr; find revs | sort | tail -n1; ) cmpr/cmpr.c
-}
-
-SH_FN_END
-*/
-
 /* #rewrite_current_block_with_llm
 
 Here we call a helper function with the block contents which returns the top part of the block, which is usually a comment, stripping the rest which is usually code.
@@ -3244,7 +3485,7 @@ void rewrite_current_block_with_llm() {
   }
 
   // Extract the comment part of the current block
-  span current_block = state->blocks.s[state->current_index];
+  span current_block = state->blocks.a[state->current_index];
   span comment = block_comment_part(current_block);
 
   if (comment.buf == NULL || len(comment) == 0) {
@@ -3268,7 +3509,6 @@ void rewrite_current_block_with_llm() {
 /* #gpt_message
 
 We get a role and a message and we return a json_o that has "role" and "content" properties.
-
 */
 
 json gpt_message(span role, span message) {
@@ -3283,10 +3523,10 @@ json gpt_message(span role, span message) {
 Here we're given a prompt to send to the LLM.
 If state->model is "clipboard" then we call send_to_clipboard, and we are done.
 
-Otherwise we use the API.
+Otherwise we use an API.
 In this case we build a json array and extend it with objects.
 Each one has a role (either user or system) and a content.
-As usual our json_* stuff is wrapped in prt2cmp and prt2std.
+As usual our json_* stuff is wrapped in prt_cmp and prt_pop.
 
 If there is a block that contains "#systemprompt", then we will send that as the first message.
 
@@ -3296,7 +3536,7 @@ To look up the blocks we use find_block(), which returns int, and state->blocks.
 
 Then in any case we send our input prompt as the last user message, and send the whole messages array to the api.
 
-We call call_llm() with state->model, the messages, and a function pointer to handle_llm_response.
+We call call_llm() with state->model, the messages, and a function pointer to replace_block_code_part.
 
 Manually edited.
 */
@@ -3307,11 +3547,11 @@ void send_to_llm(span prompt) {
         return;
     }
 
-    prt2cmp();
+    //prt_cmp();
     json messages = json_a();
     int system_index = find_block(S("#systemprompt"));
     if (system_index != -1) {
-        json_a_extend(&messages, gpt_message(S("system"), state->blocks.s[system_index]));
+        json_a_extend(&messages, gpt_message(S("system"), state->blocks.a[system_index]));
     }
 
     if (!empty(state->bootstrapprompt)) {
@@ -3320,89 +3560,119 @@ void send_to_llm(span prompt) {
     }
 
     json_a_extend(&messages, gpt_message(S("user"), prompt));
-    prt2std();
+    //prt_pop();
 
     call_llm(state->model, messages, &replace_block_code_part);
 }
-/* #handle_openai_response
+/* #handle_openai_response @jsonlib
 
 Here we get a span response from an LLM API such as OpenAI's.
 
 We parse it as json.
 
-If this fails, we print an error and the response body and exit.
-
 Otherwise, we pull the content out and pass it on.
+Specifically, we index into the JSON by:
 
-Manually written for now.
+choices, 0, message, content
+
+If any of these steps fails, we print a message, with the entire response body, and exit.
+
+Finally we get the string value from the JSON string, strip the markdown code block if any, and call the cb function with the result.
 */
 
-void handle_openai_response(span res, void (*cb)(span)) {
-  json o = json_parse(res);
-  if (json_is_null(o)) {
-    prt("JSON parse failed\n");
-    wrs(res);terpri();
-    flush();
-    exit(0);
-  }
-  json choices = json_key(S("choices"), o);
-  json first = json_index(0, choices);
-  //wrs(first.s);
-  //terpri();
-  json message = json_key(S("message"), first);
-  //wrs(message.s);
-  //terpri();
-  json content = json_key(S("content"), message);
-  //wrs(content.s);
-  //terpri();
-  span content_s = json_s2s(content, &cmp, cmp_space + BUF_SZ);
-  //wrs(content_s);
-  cb(strip_markdown_codeblock(content_s));
-  //terpri();
-  //flush();
-  //exit(0);
+void handle_openai_response(span response, void (*cb)(span)) {
+    json res_json = json_parse(response);
+    if (json_is_null(res_json)) {
+        prt("Failed to parse JSON: %.*s", len(response), response.buf);
+        flush();
+        exit(1);
+    }
+
+    json choices = json_key(S("choices"), res_json);
+    if (json_is_null(choices)) {
+        prt("Missing 'choices' in response: %.*s", len(response), response.buf);
+        flush();
+        exit(1);
+    }
+
+    json first_choice = json_index(0, choices);
+    if (json_is_null(first_choice)) {
+        prt("No choices available: %.*s", len(response), response.buf);
+        flush();
+        exit(1);
+    }
+
+    json message = json_key(S("message"), first_choice);
+    if (json_is_null(message)) {
+        prt("Missing 'message' in first choice: %.*s", len(response), response.buf);
+        flush();
+        exit(1);
+    }
+
+    json content = json_key(S("content"), message);
+    if (json_is_null(content)) {
+        prt("Missing 'content' in message: %.*s", len(response), response.buf);
+        flush();
+        exit(1);
+    }
+
+    span result_span = json_un_s(content);
+    result_span = strip_markdown_codeblock(result_span);
+    cb(result_span);
 }
 
-/* #handle_ollama_response
+/* #handle_ollama_response @handle_openai_response
 
-This is similar to handle_openai_response but for ollama API responses, and also hand-written.
+This is similar to handle_openai_response above, but for ollama API responses.
+
+The only difference is the structure we descend into:
+
+message, content
+
 */
 
-void handle_ollama_response(span res, void (*cb)(span)) {
-  json o = json_parse(res);
-  if (json_is_null(o)) {
-    prt("JSON parse failed\n");
-    wrs(res);terpri();
-    flush();
-    exit(0);
-  }
-  json message = json_key(S("message"), o);
-  //wrs(message.s);
-  //terpri();
-  json content = json_key(S("content"), message);
-  //wrs(content.s);
-  //terpri();
-  span content_s = json_s2s(content, &cmp, cmp_space + BUF_SZ);
-  //wrs(content_s);
-  //flush();
-  //sleep(1);
-  cb(strip_markdown_codeblock(content_s));
-  //terpri();
-  //flush();
-  //exit(0);
+void handle_ollama_response(span response, void (*cb)(span)) {
+    json res = json_parse(response);
+    if (json_is_null(res)) {
+        prt("Error parsing JSON: %.*s", len(response), response.buf);
+        flush();
+        exit(1);
+    }
+
+    json message = json_key(S("message"), res);
+    if (json_is_null(message)) {
+        prt("Missing 'message': %.*s", len(response), response.buf);
+        flush();
+        exit(1);
+    }
+
+    json content = json_key(S("content"), message);
+    if (json_is_null(content)) {
+        prt("Missing 'content': %.*s", len(response), response.buf);
+        flush();
+        exit(1);
+    }
+
+    span content_span = json_un_s(content);
+    span stripped_content = strip_markdown_codeblock(content_span);
+    cb(stripped_content);
 }
-/* #block_comment_part
+
+/* #block_comment_part @langtable
 
 To split out the block_comment_part of a span, we first write two helper functions, one for C and one for Python.
 Others will be added but these are the only ones we've needed so far.
 
-Then we dispatch based on the language on the projfile which we lookup using file_for_block(), and .language on the file in the state.
-Previously, if this span contained "Python" we called the Python version, and otherwise we called the C version (which was therefore our default).
+Then we dispatch based on the language.
+We lookup the using language_for_block on the block itself.
+Previously, if the language was "Python" we called the Python version, and otherwise we called the C version (which was therefore our default).
 Now, however, we look up the language in the #langtable above and call the find block comment end implementation.
 For example, the third language we support is JS, which uses the same implementation as C.
+For markdown, there is no comment part (or the whole block is considered a comment) so we simply return the entire block.
 
 The helper function always takes a span and returns an index offset to the location of the "block comment part terminator".
 For Python this is the second occurrence of the triple doublequote in the block, and for C it is star slash.
+Simple for loops over block.buf up to len(block) are best here.
 
 In the main function block_comment_part, we return the span up to and including the comment part terminator, and also including any newlines and whitespace after it.
 This means each of the helper functions returns the offset at which the comment terminator ends, and the main function includes a while isspace loop to advance past any whitespace.
@@ -3411,45 +3681,131 @@ This means each of the helper functions returns the offset at which the comment 
 All three functions are written below.
 */
 
-static int find_block_comment_end_c(span block) {
+int find_comment_end_c(span block) {
     for (int i = 0; i < len(block) - 1; i++) {
-        if (block.buf[i] == '*' && block.buf[i + 1] == '/') {
-            return i + 2; // Return the index just past the terminator
+        if (block.buf[i] == '*' && block.buf[i+1] == '/') {
+            return i + 2; // Include the length of "*/"
         }
     }
-    return len(block); // If not found, return the length of the block
+    return -1;
 }
 
-static int find_block_comment_end_python(span block) {
+int find_comment_end_python(span block) {
     int count = 0;
     for (int i = 0; i < len(block) - 2; i++) {
-        if (block.buf[i] == '"' && block.buf[i + 1] == '"' && block.buf[i + 2] == '"') {
+        if (block.buf[i] == '"' && block.buf[i+1] == '"' && block.buf[i+2] == '"') {
             count++;
-            if (count == 2) { // Second occurrence
-                return i + 3; // Return the index just past the terminator
+            if (count == 2) {
+                return i + 3; // Include the length of "\"\"\""
             }
-            i += 2; // Skip past this triple-quote
         }
     }
-    return len(block); // If not found, return the length of the block
+    return -1;
 }
 
 span block_comment_part(span block) {
-    int index = file_for_block(block);
-    span language = state->files.a[index].language;
-    int end;
+    span language = language_for_block(block);
+    int end_idx = -1;
     if (span_eq(language, S("Python"))) {
-        end = find_block_comment_end_python(block);
-    } else { // Default to C, includes C and JavaScript
-        end = find_block_comment_end_c(block);
-    }
-    
-    while (end < len(block) && isspace(block.buf[end])) {
-        end++; // Advance past whitespace
+        end_idx = find_comment_end_python(block);
+    } else if (span_eq(language, S("C")) || span_eq(language, S("JavaScript"))) {
+        end_idx = find_comment_end_c(block);
+    } else if (span_eq(language, S("Markdown"))) {
+        return block; // Markdown blocks are considered full comments
     }
 
-    span result = {block.buf, block.buf + end};
-    return result;
+    if (end_idx != -1) {
+        while (isspace(block.buf[end_idx]) && end_idx < len(block)) {
+            end_idx++; // Skip whitespace after the comment end
+        }
+        return first_n(block, end_idx);
+    }
+
+    return nullspan(); // No comment part found or not applicable
+}
+
+/* #block_comment_part_excl @langtable
+
+Similar to block_comment_part, we get a block and return the comment part, only in this case with the comment block delimiters, if any, removed.
+
+First we call language_for_block to get the appropriate language to use.
+
+Then we call block_comment_part, which gives us the comment part but with delimiters included.
+
+We trim any whitespace (whitespace after the comment part will be included by block_comment_part).
+
+We examine the first few characters of the trimmed result.
+If it matches the starting comment delimiter for the language (if any) then we remove it.
+
+Then we do the same for the last few characters, and finally return the span.
+*/
+
+span block_comment_part_excl(span block) {
+    span language = language_for_block(block);
+    span comment = block_comment_part(block);
+    comment = trim(comment);
+
+    if (span_eq(language, S("C")) || span_eq(language, S("JavaScript"))) {
+        if (starts_with(comment, S("/*"))) {
+            advance(&comment, 2);
+        }
+        if (ends_with(comment, S("*/"))) {
+            shorten(&comment, 2);
+        }
+    } else if (span_eq(language, S("Python"))) {
+        if (starts_with(comment, S("\"\"\""))) {
+            advance(&comment, 3);
+        }
+        if (ends_with(comment, S("\"\"\""))) {
+            shorten(&comment, 3);
+        }
+    }
+
+    return comment;
+}
+
+/* #block_code_part
+
+Meant to be dual to block_comment_part.
+
+For that reason, we simply call block_comment_part to get the comment part, and then return the other part.
+
+(We know that the comment is always the first part of the block, so we can set .buf on the input span to be the .end of the comment part and simply return that.)
+*/
+
+span block_code_part(span block) {
+    span comment = block_comment_part(block);
+    block.buf = comment.end;
+    return block;
+}
+
+/* #block_transforms
+
+We are given a full block and a transform function name to perform.
+
+The following transforms are defined, and implemented by the following functions:
+
+- comment: block_comment_part
+- inner-comment: block_comment_part_excl
+- code: block_code_part
+- all: (identity transform)
+
+*/
+
+span block_transforms(span block, span fn) {
+    if (span_eq(fn, S("comment"))) {
+        return block_comment_part(block);
+    } else if (span_eq(fn, S("inner-comment"))) {
+        return block_comment_part_excl(block);
+    } else if (span_eq(fn, S("code"))) {
+        return block_code_part(block);
+    } else if (span_eq(fn, S("all"))) {
+        return block;
+    } else {
+        prt("Unknown transform: %.*s\n", len(fn), fn.buf);
+        flush();
+        exit(1);
+    }
 }
 
 /* #print_block #print_comment #print_code #count_blocks
@@ -3466,7 +3822,7 @@ count_blocks() is a trivial wrapper around state.blocks.n.
 
 void print_comment(int index) {
     if (index < 0 || index >= state->blocks.n) return;
-    span block = state->blocks.s[index];
+    span block = state->blocks.a[index];
     span comment_part = block_comment_part(block);
     wrs(comment_part);
     terpri();
@@ -3474,7 +3830,7 @@ void print_comment(int index) {
 
 void print_code(int index) {
     if (index < 0 || index >= state->blocks.n) return;
-    span block = state->blocks.s[index];
+    span block = state->blocks.a[index];
     span comment_part = block_comment_part(block);
     span code_part = block;
     code_part.buf = comment_part.end;
@@ -3484,7 +3840,7 @@ void print_code(int index) {
 
 void print_block(int index) {
     if (index < 0 || index >= state->blocks.n) return;
-    span block = state->blocks.s[index];
+    span block = state->blocks.a[index];
     wrs(block);
     terpri();
 }
@@ -3500,20 +3856,56 @@ This is similar to the search implementation: we iterate over all the blocks, fi
 
 int find_block(span search_text) {
     for (int i = 0; i < state->blocks.n; i++) {
-        if (contains(state->blocks.s[i], search_text)) {
+        if (contains(state->blocks.a[i], search_text)) {
             return i;
         }
     }
     return -1;
 }
 
-/* #comment_to_prompt
+/* #block_by_id
+
+This is also similar to the search implementation.
+
+We are given a block id, without the hash.
+
+We store cmp.end in a variable so we can reset it later.
+
+We use prs to make a string with the "#" followed by the given id.
+
+We use find_block to find the first occurrence of that string in a block.
+
+We then reset cmp.end, and return either the block, or the null span if not found.
+
+span block_by_id(span id) {
+    u8* old_cmp_end = cmp.end;
+    span search_id = prs("#%.*s", len(id), id.buf);
+    int block_index = find_block(search_id);
+    cmp.end = old_cmp_end;
+    if (block_index >= 0) {
+        return state->blocks.a[block_index];
+    }
+    return nullspan();
+}
+
+*/
+
+int block_by_id(span id) {
+    u8* old_cmp_end = cmp.end;
+    span search_id = prs("#%.*s", len(id), id.buf);
+    int block_index = find_block(search_id);
+    cmp.end = old_cmp_end;
+    return block_index;
+}
+
+/* #comment_to_prompt @langtable
 
 In comment_to_prompt, we use the cmp space to construct a prompt around the given block comment.
 
-First we should create our return span and assign .buf to the cmp.end location.
+First we call expand_refs, which expands the block contents with any block references.
 
-Then we call prt2cmp.
+We use out2cmp to redirect the output to cmp space.
+We create our return span and assign .buf to the cmp.end location.
 
 Next we prt a literal string (such as "```c\n").
 Then we use wrs to write the span passed in as our argument.
@@ -3521,33 +3913,240 @@ Finally we write "```\n\n" and an instruction.
 
 The above three elements are given in #langtable above as 6., block comment part to prompt pattern.
 
-Next we call prt2std to go back to the normal output mode.
+We can use language_for_block to get the language appropriate to the block (actually the comment part) that is passed in.
+
+We use out_rst (with the value from out2cmp earlier) to go back to the normal output mode.
 
 Then we can get the new end of cmp and make that the end of our return span so that we return everything written into the cmp space.
 */
 
-span comment_to_prompt(span comment) {
-    span ret;
-    ret.buf = cmp.end;
-    prt2cmp();
-    if (state->current_language.buf[0] == 'C') {
+span comment_to_prompt(span block_comment) {
+    span expanded_comment = expand_refs(block_comment);
+    span lang = language_for_block(block_comment);
+    void* o = out2cmp();
+    span ret = {.buf = cmp.end};
+
+    if (span_eq(lang, S("C"))) {
         prt("```c\n");
-    } else if (state->current_language.buf[0] == 'P') { // Python
+        wrs(expanded_comment);
+        prt("```\n\nWrite the code. Reply only with code. Do not include comments.\n");
+    } else if (span_eq(lang, S("Python"))) {
         prt("```python\n");
-    } else if (state->current_language.buf[0] == 'J') { // JavaScript
-        prt("```js\n");
-    }
-    wrs(comment);
-    if (state->current_language.buf[0] == 'C') {
-        prt("```\n\nWrite the code. Reply only with code. Do not include comments.\n");
-    } else if (state->current_language.buf[0] == 'P') { // Python
+        wrs(expanded_comment);
         prt("```\n\nWrite the code. Reply only with code. Avoid code_interpreter.\n");
-    } else if (state->current_language.buf[0] == 'J') { // JavaScript
+    } else if (span_eq(lang, S("JavaScript"))) {
+        prt("```js\n");
+        wrs(expanded_comment);
         prt("```\n\nWrite the code. Reply only with code. Do not include comments.\n");
+    } else if (span_eq(lang, S("Markdown"))) {
+        wrs(expanded_comment);
     }
-    prt2std();
+
+    out_rst(o);
     ret.end = cmp.end;
     return ret;
+}
+
+/* #ex_expandrefs
+
+This is mainly for debugging the block references before sending the output to the LLM.
+
+Here we get the current block, get the comment part and call expand_refs on it.
+We clear the display, then display the result to the user with wrs.
+Then we prompt with "Press any key to continue..." and getch() before returning.
+*/
+
+void ex_expandrefs() {
+    span current_comment = block_comment_part(state->blocks.a[state->current_index]);
+    span expanded = expand_refs(current_comment);
+    clear_display();
+    wrs(expanded);
+    prt("Press any key to continue...");
+    flush();
+    getch();
+}
+
+/* Block reference design
+
+A block may contain references and an id/metadata top line.
+
+We will follow and expand references, remove the top line, and return the expanded result.
+
+There may be reference loops.
+For now we will just limit the expansions to 32, and if the limit is hit, we will alert the user.
+
+We will support two kinds of references, both using the same "@<id>" syntax where <id> is any block id.
+
+First we will have references listed in the header/metadata top line, and second will be inline references, which will appear on a line alone.
+
+Example block, using [[ ]] as mock block comment syntax:
+
+[[ #block_id @ref_1 @ref_2
+
+Some text.
+
+@ref_3
+
+More text.
+]]
+
+When this block is expanded, we would include the content of blocks ref_1 and ref_2 first, then the block text with ref_3 expanded inline.
+
+The top-line blocks should be separated by "\n\n" from each other and the start of the block.
+
+References use @id and blocks are identified by #id, so to follow references we remove the "@", add the "#", and then do a find_block to search for the first block containing that text.
+*/
+/* #expand_refs
+
+Here we get a span with references to be expanded.
+
+There is a resource-management part of the problem which we handle here, and a recursive part.
+
+We set up span that we will return, pointing .buf to the current cmp.end.
+We call prt_cmp and spans_arena_push.
+Then we call expand_refs_rec for the recursive part (which will output the expanded block into cmp space using prt).
+Finally we call prt_pop and spans_arena_pop.
+We update our ret span's .end to the current cmp.end, and return it.
+*/
+
+span expand_refs(span references) {
+    span ret = {.buf = cmp.end, .end = cmp.end};
+    void *o = out2cmp();
+    spans_arena_push();
+    expand_refs_rec(references,0);
+    out_rst(o);
+    spans_arena_pop();
+    ret.end = cmp.end;
+    return ret;
+}
+
+/* #expand_refs_rec
+
+Here we get the comment part of a block, which may contain two kinds of references, which we will expand and print.
+Our second argument is the depth of the recursion so far, specifically it is the number of levels above this one (so it starts at zero).
+
+First we have top-line references, which occur on the top line and will be expanded in order before the block contents.
+
+Next, we have inline references, which occur on a line alone and will be expanded inline.
+
+We take the top line off of the input (using next_line) and handle it separately.
+
+We can split this top line on whitespace using split_whitespace, and iterate over the tokens.
+
+For each token,
+If the first character is "#", that is the "block id" for this block.
+We stick it in a variable block_id for use later.
+
+(The reason why we print the block id out of order is that the block id will usually be the first thing on the top line, followed by references to be expanded.
+However in the expanded output, the id should come above the block comment text itself, not above other included content, as that would be hard to follow.)
+
+If the first character is "@" then we call chase_ref with that token.
+The return value from chase_ref will either be a block, or if the reference expansion failed, it will be an empty span.
+If the span is empty, then we prt the token unmodified followed by a newline.
+(This lets the user see that the expansion failed rather than failing silently.)
+Otherwise, we recursively call expand_refs_rec on the returned block so that further references can be expanded.
+@- To get the comment part we use block_comment_part_excl, since we want the block comment delimiters excluded.
+We print a newline after the recursive call, to keep them nicely separated.
+
+For tokens that don't start with "@" we simply print them as-is, followed by a newline.
+
+Now we've handled the top line; next we will handle the block id, and then the rest of the block's contents.
+
+If the recursion level is zero, i.e. this is the call corresponding to the top-level block being expanded, then we print four blank lines, "----" on a line by itself, "(end references)" with a blank line before and after it, and then finally the block id, also followed by a blank line.
+Otherwise, we simply print the block id on a line by itself, with a blank line before and after it.
+
+After handling the top line, we get to the block content itself, which we handle line by line.
+
+If the first a line starts with "@- " we treat it as a comment and simply skip it.
+
+If a line begins with "@" then we call chase_ref.
+If chase_ref returns an empty span, then again we print the line unmodified, followed by a newline.
+@- Otherwise, we again recurse on the comment part of the returned block.
+@- Otherwise, we call strip_block_comment_delimiters, since we are already inside a comment, and we again recurse on the returned block.
+Here, we do not print a newline after, as the recursive block will already end with one, and if further newlines are needed, they can be added around the references by the user.
+
+For lines not starting with "@", we also simply print them as-is, followed by newline.
+*/
+
+void expand_refs_rec(span block, int depth) {
+    span line = next_line(&block);
+    spans tokens = split_whitespace(line);
+    span block_id = nullspan();
+    for (int i = 0; i < tokens.n; i++) {
+        span token = tokens.a[i];
+        if (token.buf[0] == '#') {
+            block_id = token;
+        } else if (token.buf[0] == '@') {
+            span ref_block = chase_ref(token);
+            if (empty(ref_block)) {
+                prt("%.*s\n", len(token), token.buf);
+            } else {
+                expand_refs_rec(ref_block, depth + 1);
+                terpri();
+            }
+        } else {
+            prt("%.*s\n", len(token), token.buf);
+        }
+    }
+    if (depth == 0) {
+        terpri(); terpri(); terpri(); terpri();
+        prt("----\n");
+        terpri();
+        prt("(end references)\n");
+        terpri(); terpri();
+    }
+    if (!empty(block_id)) {
+        terpri();
+        prt("%.*s\n", len(block_id), block_id.buf);
+        terpri();
+    }
+    while (!empty(block)) {
+        line = next_line(&block);
+        if (len(line) >= 3 && line.buf[0] == '@' && line.buf[1] == '-' && line.buf[2] == ' ') {
+            continue;
+        }
+        if (len(line) > 0 && line.buf[0] == '@') {
+            span ref_block = chase_ref(line);
+            if (empty(ref_block)) {
+                prt("%.*s\n", len(line), line.buf);
+            } else {
+                expand_refs_rec(ref_block, depth + 1);
+            }
+        } else {
+            prt("%.*s\n", len(line), line.buf);
+        }
+    }
+}
+
+/* #chase_ref @sio
+
+Here we get a reference like "@id" where "id" is any block identifier.
+The reference may also have a modifier, which is a ":" followed by a function name, like "@id:all".
+
+We check that the "@" is present (and return the null span if not) but otherwise we won't need it so we move past it.
+We check if the ":" is present, as we must handle both cases.
+
+We use block_by_id to get the block, and if there is no match, we return the null span.
+
+Finally we tail call block_transforms with the block (from state) and the modifier function name, if any.
+The default modifier is "inner-comment", so if one was not provided, we use that.
+*/
+
+span chase_ref(span ref) {
+    span ret = nullspan();
+    if (empty(ref) || ref.buf[0] != '@') return ret;
+
+    advance1(&ref);
+
+    int mod_index = find_char(ref, ':');
+    span id = (mod_index != -1) ? first_n(ref, mod_index) : ref;
+    span mod = (mod_index != -1) ? skip_n(ref, mod_index + 1) : S("inner-comment");
+
+    int block_idx = block_by_id(id);
+    if (block_idx == -1) return ret;
+
+    span block = state->blocks.a[block_idx];
+    return block_transforms(block, mod);
 }
 
 /* #strip_markdown_codeblock
@@ -3557,39 +4156,43 @@ We are given a span and we find the code inside a code block, if there is one.
 First we declare a span that we will return.
 
 We make a copy of the input and iterate over all the lines and find those that start with "```".
+The first we call the top line and the second the end line.
 
 If there are not exactly two such lines we return the input unchanged.
 
-Otherwise, our return span starts from the line after the first "```" line and ends with the line before the second one.
+Otherwise, our return span starts after the newline of the top line and ends before the newline of the last line before the end line.
+
+Therefore, in our loop, we can simply count the "```" lines we have seen.
+If it is zero, we set ret.buf, if one, we set ret.end, and if it is two, we return the input unchanged.
+After the loop, if the count is not exactly two, we again return the input unchanged, otherwise we return ret.
 */
 
 span strip_markdown_codeblock(span input) {
-    span ret = input; // default to returning unchanged
+    int count = 0;
+    span ret = nullspan();
     span copy = input;
 
-    int count = 0;
-    span marker_lines[2];
-
-    span line;
     while (!empty(copy)) {
-        line = next_line(&copy);
+        span line = next_line(&copy);
         if (starts_with(line, S("```"))) {
-            if (count < 2) {
-                marker_lines[count] = line;
+            if (count == 0) {
+                ret.buf = line.end + 1;
+            } else if (count == 1) {
+                ret.end = line.buf;
             }
             count++;
         }
     }
 
-    if (count == 2) {
-        ret.buf = marker_lines[0].end + 1; // start after the first ```
-        ret.end = marker_lines[1].buf; // end before the second ```
+    if (count != 2) {
+        return input;
     }
 
     return ret;
 }
 
-/*
+/* #send_to_clipboard
+
 In send_to_clipboard, we are given a span and we must send it to the clipboard using a user-provided method, since this varies quite a bit between environments.
 
 There is a global ui_state* variable "state" with a span cbcopy on it.
@@ -3750,8 +4353,8 @@ Once all this is done, we call new_rev, passing a null span for the filename, si
 */
 
 void replace_block_code_part(span new_code) {
-    int file_index = file_for_block(state->blocks.s[state->current_index]);
-    span original_block = state->blocks.s[state->current_index];
+    int file_index = file_for_block(state->blocks.a[state->current_index]);
+    span original_block = state->blocks.a[state->current_index];
     span comment_part = block_comment_part(original_block);
     //wrs(new_code);terpri();flush();getch();//DBG
     //prt("%.32s\n", cmp_space);
@@ -3798,23 +4401,23 @@ void replace_block_code_part(span new_code) {
     // Store a new revision, no filename required
     new_rev(nullspan(), file_index);
 }
-/* cmpr_init
+/* #cmpr_init
+
 We are called without args and set up some configuration and empty directories to prepare the CWD for use as a cmpr project.
 
 In sh terms:
 
-- mkdir -p .cmpr/{,revs,tmp}
+- mkdir -p .cmpr/{,revs,tmp,api_calls}
 - touch .cmpr/conf
 
-Note that if the CWD is already initialized this is a no-op i.e. the init is idempotent (up to file access times and similar).
-
-TODO: can set revs and tmp already in conf, if not already set.
+Note that if the CWD is already initialized as a cmpr project this is a no-op, i.e. the init is idempotent (up to file access times and similar).
 */
 
 void cmpr_init() {
     mkdir(".cmpr", 0755);
     mkdir(".cmpr/revs", 0755);
     mkdir(".cmpr/tmp", 0755);
+    mkdir(".cmpr/api_calls", 0755);
 
     FILE *file = fopen(".cmpr/conf", "a");
     if (file != NULL) {

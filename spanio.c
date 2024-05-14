@@ -12,7 +12,6 @@ A span has a start pointer and an end pointer, called .buf and .end respectively
 - empty(span): If a span is empty (start and end pointers are equal).
 - len(span): The length of a span. Prefer this over less clear .end minus .buf.
 - init_spans(): Init global spans and buffers; called only from main().
-- prt2cmp(), prt2std(): Swaps out and cmp spans.
 - prt(char *, ...): Formats and appends a string to the output span, i.e. prints it. Pronounced as prt.
 - prs(char *, ...): Same as prt, but returns a span (allocated in cmp space).
 - w_char(char): Writes a single character.
@@ -20,7 +19,8 @@ A span has a start pointer and an end pointer, called .buf and .end respectively
 - bksp(): Backspace, shortens the output span by one.
 - sp(): Appends a space character to the output span, i.e. prints a space.
 - terpri(): Prints a newline (name courtesy Common Lisp).
-- flush(), flush_err(), flush_to(char*): Flushes the output span to standard output, standard error, or a specified file.
+- void* out2cmp(), out_rst(void*): redirect all output functions to cmp (instead of out) and then undo (reset)
+- flush(), flush_err(): Flushes the output span to standard output or standard error.
 - write_to_file_span(span content, span path, int clobber): Write a span to a file, optionally overwriting.
 - write_to_file(span, const char*): Deprecated.
 - read_file_into_span(char*, span): Reads the contents of a file into a span. Deprecated.
@@ -28,14 +28,16 @@ A span has a start pointer and an end pointer, called .buf and .end respectively
 - read_file_into_cmp(span): Filename as a span, returns contents as a span inside cmp space.
 - read_file_into_inp(span): Filename as a span, returns contents as a span inside inp space.
 - advance1(span*), advance(span*, int): Advances the start pointer of a span by one or a specified number of characters.
+- shorten1(span*), shorten(span*, int): Shortens a span by one or by a given number of characters.
 - find_char(span, char): Searches for a character in a span and returns its first index or -1.
 - contains(span, span): Checks if one span TEXTUALLY contains another; abc b O(n) string search.
 - contains_ptr(span, span): Checks if one span PHYSICALLY contains another; [[]] O(1) pointer comparisons.
-- starts_with(span, span): Check if first span is textual prefix of second (or equal).
+- starts_with(span, span): Check if $2 is textual prefix of $1 (or equal) (mnemonic: a "starts with" b).
+- ends_with(span, span): Check if $1 ends with $2.
 - consume_prefix(span, span*): Shortens a span by a prefix if present, returning that prefix or nullspan().
-- take_n(int, span*): Returns as a new span the first n characters from a span, advancing its .buf.
-- first_n(span, int): Returns n leading chars as a new span without mutating.
-- skip_n(span, int): Returns a span skipping initial chars.
+- first_n(span, int): Returns n leading chars of a span.
+- skip_n(span, int): Returns a new span skipping n initial chars.
+- take_n(int, span*): Returns as a new span the first n characters from a span, mutating it; often used when parsing.
 - skip_whitespace(span*): modifies a span, returning a prefix span of zero or more removed whitespace.
 - next_line(span*): Extracts the next line (up to \n or .end) from a span and returns it as a new span.
 - span_eq(span, span), span_cmp(span, span): Compares two spans for equality or lexicographical order.
@@ -43,57 +45,31 @@ A span has a start pointer and an end pointer, called .buf and .end respectively
 - char* s(span): Returns a null-terminated string (in cmp space) containing the given contents.
 - char* s_buffer(char*,int,span): Copies $3 into $1 (of length $2) and null-terminates it, returning $1 for convenience.
 - nullspan(): Returns the empty span at address 0.
-- spans_alloc(int), span_arena_alloc(int), span_arena_free(), span_arena_push(), span_arena_pop(): Span arena.
+- span_arena_alloc(int),span_arena_free(): top-level setup and free spans arena (typically once per program).
+- span_arena_push(),span_arena_pop(): checkpoint arena highpoint and reset it, releasing memory.
+- spans spans_alloc(int): alloc a spans with the given size (.n already set).
 - is_one_of(span, spans): Checks if a span textually equals one of the spans in a spans.
+- index_of(span,spans): Return first element of $2 which is span_eq $1, or -1 if none match.
 - spanspan(span, span): Finds the first occurrence of a span within another span and returns a span into haystack.
 - w_char_esc(char), w_char_esc_pad(char), w_char_esc_dq(char), w_char_esc_sq(char), wrs_esc(): Write characters (or for wrs_esc, spans) to the output span, applying various escape sequences.
 - trim(span): Gives the possibly smaller span with any isspace(3) trimmed on both sides.
+- split_commas_ws(span): splits a span into a spans on commas, stripping whitespace
+- split_whitespace(span): split a span into tokens on whitespace
 - concat(span,span): Returns a new span (in cmp space) containing a concatenation.
 
-JSON
-
-- json_s(span): prt a JSON string (double-quoted and escaped appropriately).
-- json_n(f64): prt a double in JSON format.
-- json_b(int): prt a true or false (only 0 is false).
-- json_0(): prt a json_null value ("null").
-- json_o(): prt an empty json object.
-- json_o_extend(json*,span,json): extends $1 with key $2 and value $3.
-- json_a(): prt an empty json array.
-- json_a_extend(json*,json): extends $1 with key $2.
-- all the above json constructor functions return the json type (which they also prt, usually this is sent to cmp space) as in the _{s,n,b,0,o,a} constructors.
-- json_{s,n,b,0,o,a}p: full list of json_?p predicate funcs, used to distinguish types of json values.
-  - (for example) json_sp(json): 1 if $1 is a string, otherwise 0.
-- json_key(span, json): lookup on json object.
-- json_index(int, json): lookup on json array.
-- the above lookup functions return a "nullable json": either an ordinary json value or a null json if anything went wrong.
-- mnemonic: the argument order was inspired by partial application.
-- int json_is_null(json): returns 0 or 1.
-- json_parse(span): parse a span into a json and return it; may be shorter only by trimmed whitespace; commonly used.
-- make_json(span): return a json wrapper of the span in O(1); the span must be known to be valid json already; rarely used.
-- json_s2s(json,span*,u8*): converts json string $1 into an unquoted string in $2 (not exceeding buffer end $3); returns a span.
-- json_parse_prefix(span*): not usually called directly, but can be used to parse a json value off the front of a buffer, shortening it.
-- Every json value wraps a span .s, which can be accessed directly whenever the string value of the json is needed.
-
 typedef struct { u8* buf; u8* end; } span; // the type of span
-
-typedef struct { span *s; int n; } spans; // the type of spans, given by spans_alloc(n)
 
 We have a generic array implementation using arena allocation.
 
 - Call MAKE_ARENA(E,T,STACK_SIZE) to define array type T for elements of type E.
-- T will have .a and .n on it of type E* and int resp.
+- T will have .a of type E*, and .n, and .cap of type size_t.
 - Use T_arena_alloc(N) and T_arena_free(), typically in main() or similar.
 - T_alloc(N) returns an array of type T, with .n = .cap = N.
-- T_arena_push() and T_arena_pop() manage arena allocation stack.
+- T_arena_push() and T_arena_pop() manage arena allocation stack; use them as directed.
+- Use T_push(T,E) to push an element onto an array.
 
-Note that spans uses .s for the array member, not .a like all of our generic array types.
-This is because spans predates our generic arena implementation, and we should fix it.
-In particular projfiles (state->files) uses .a as it is a generic array type.
+This is used to declare a spans type and the associated functions.
 
-Note that spans has only a .n not a separate capacity value.
-Therefore spans_alloc returns a spans which has n equal to the number passed in.
-Typically the caller will either fill the number requested exactly, or will shorten n if fewer are used.
-These point into the spans arena which must be set up by calling span_arena_alloc() with some integer argument (in bytes).
 A common idiom is to iterate over something once to count the number of spans needed, then call spans_alloc and iterate again to fill the spans.
 
 A common idiom in functions returning span: use a span ret declared near the top, with buf pointing to one thing and end to something else found later or separately, they may be set anywhere in the function body as convenient, and the ret value is returned from one or more places.
@@ -119,6 +95,55 @@ A common idiom is next_line() in a loop with !empty().
 In main() or similar it is common to call init_spans and often also read_and_count_stdin.
 */
 
+/* #jsonlib
+
+JSON support in the spanio library.
+
+- json_s(span): prt a JSON string (double-quoted and escaped appropriately).
+- json_n(f64): prt a double in JSON format.
+- json_b(int): prt a true or false (only 0 is false).
+- json_0(): prt a json_null value ("null").
+- json_o(): prt an empty json object.
+- json_o_extend(json*,span,json): extends $1 with key $2 and value $3.
+- json_a(): prt an empty json array.
+- json_a_extend(json*,json): extends $1 with key $2.
+- all the above json constructor functions return the json type (which they also prt, usually this is sent to cmp space) as in the _{s,n,b,0,o,a} constructors.
+- json_{s,n,b,0,o,a}p: full list of json_?p predicate funcs, used to distinguish types of json values.
+  - (for example) json_sp(json): 1 if $1 is a string, otherwise 0.
+- json_key(span, json): lookup on json object.
+- json_index(int, json): lookup on json array.
+- above lookup functions return a "nullable json".
+- mnemonic: the argument order was inspired by partial application.
+- int json_is_null(json): returns 0 or 1.
+- json_un_s(json): return a span containing the actual value of a json string value (e.g. from json_key or json_index).
+- json_parse(span): parse a span into a json and return it; may be shorter only by trimmed whitespace; commonly used.
+- make_json(span): return a json wrapper of the span in O(1); the span must be known to be valid json already; rarely used.
+- json_s2s(json,span*,u8*): converts json string $1 into an unquoted string in $2 (not exceeding buffer end $3); returns a span.
+- json_parse_prefix(span*): not usually called directly, but can be used to parse a json value off the front of a buffer, shortening it.
+
+The json type is a wrapped span which actually contains a JSON-formatted string, allocated in cmp space.
+Every json value wraps a span .s, which can be accessed directly whenever the string value of the json is needed, for example when sending as JSON over the wire.
+
+There are constructor functions for all the primitive types, and for the collection types, array and object, there are constructors for the empty collections and extend functions to extend them.
+These extend them in place, and are intended for relatively simple applications like building a message for an API call.
+
+There are predicate functions for the json type that distinguish between numbers, arrays, and so on.
+(Since the json type just wraps an actual JSON string, these work by looking at the first character of that string, which is definitive; this implies that the json type doesn't include leading or trailing whitespace.)
+
+JSON defines a literal "null" value, but we define a separate "nulljson" distinguished signal value, testable by json_is_null, which indicates some kind of hard failure.
+It is returned by all the json-returning functions that can fail, such as indexing an array or object, or parsing a JSON string.
+It is simply the json type wrapping a nullspan (the span having .buf = .end = 0).
+
+The function make_json is rarely used and is for "casting" a span to a json object in constant time.
+It is normally only used internally in library methods, but can be used if you know you have a JSON string and don't want to parse it again.
+
+The json indexing functions return the json type; that is, the contents are still valid JSON.
+In particular, a JSON string will contain JSON string escaping.
+If you want the actual string value, you can use json_un_s, which returns a new span in cmp space.
+(This uses the lower-level json_s2s, which has a less convenient interface.)
+
+(We should probably have a similar function for getting a number out, but it hasn't been added yet.)
+*/
 /* json library design notes
 
 - all the json constructor functions trim whitespace, so that all the predicate functions follow a pointer and examine one byte.
@@ -198,6 +223,7 @@ u8 *input_space; // remains immutable once stdin has been read up to EOF.
 u8 *output_space;
 u8 *cmp_space;
 span out, inp, cmp;
+span* outp;
 
 int empty(span);
 int len(span);
@@ -206,34 +232,33 @@ void init_spans(); // main spanio init function
 
 // basic spanio primitives
 
-void prt2cmp();
-void prt2std();
 void prt(const char *, ...);
 void w_char(char);
 void wrs(span);
 void bksp();
 void sp();
 void terpri();
-void flush();
-void flush_err();
-void flush_to(char*);
-void write_to_file(span content, const char* filename);
-span read_file_into_span(char *filename, span buffer);
-span read_file_S_into_span(span filename, span buffer);
-span read_file_into_cmp(span filename);
-void redir(span);
-span reset();
 void w_char_esc(char);
 void w_char_esc_pad(char);
 void w_char_esc_dq(char);
 void w_char_esc_sq(char);
-void wrs_esc();
-void save();
-void push(span);
-void pop(span*);
+void wrs_esc(span);
+void* out2cmp(); // redirect all output functions (prt, wrs, etc) to cmp instead of out
+void out_rst(void*); // undo effect of out2cmp
+void flush();
+void flush_err();
+void write_to_file(span content, const char* filename);
+span read_file_into_span(char *filename, span buffer);
+span read_file_S_into_span(span filename, span buffer);
+span read_file_into_cmp(span filename);
+//void redir(span);
+//span reset();
+//void save();
+//void push(span);
+//void pop(span*);
 void advance1(span*);
 void advance(span*,int);
-span pop_into_span();
+//span pop_into_span();
 int find_char(span s, char c);
 int contains(span, span);
 span take_n(int, span*);
@@ -244,6 +269,7 @@ int span_cmp(span, span);
 span S(char*);
 span nullspan();
 
+ /*
 typedef struct {
   span *s; // array of spans (points into span arena)
   int n;   // length of array
@@ -261,6 +287,7 @@ void span_arena_alloc(int);
 void span_arena_free();
 void span_arena_push();
 void span_arena_pop();
+*/
 
 span inp_compl();
 span cmp_compl();
@@ -291,9 +318,10 @@ void init_spans() {
   inp.end = input_space;
   cmp.buf = cmp_space;
   cmp.end = cmp_space;
+  outp = &out;
 }
 
-void bksp() { out.end--; }
+void bksp() { (*outp).end--; }
 
 void sp() { w_char(' '); }
 
@@ -338,10 +366,10 @@ char* s_buffer(char* buf, int n, span s) {
 char* s(span s) {
   if (len(s) && s.end[-1] == '\0') return (char*)s.buf;
   char* ret = (char*)cmp.end;
-  prt2cmp();
+  void* o = out2cmp();
   wrs(s);
   w_char('\0');
-  prt2std();
+  out_rst(o);
   return ret;
 }
 
@@ -359,6 +387,7 @@ void read_and_count_stdin() {
   inp.buf = input_space;
 }
 
+/*
 span saved_out[16] = {0};
 int saved_out_stack = 0;
 
@@ -374,16 +403,25 @@ span reset() {
   out = saved_out[--saved_out_stack];
   return ret;
 }
+*/
 
 // set if debugging some crash
 const int ALWAYS_FLUSH = 0;
 
-// Note: this doesn't swap out_space, which means manual comparisons with out_space + BUF_SZ will be broken?
+// Note: this doesn't swap output_space, which means manual comparisons with output_space + BUF_SZ will be broken?
 // probably an argument for the "thran"
 // actually we should just be using out.buf + BUF_SZ anyway I suppose
-void swapcmp() { span swap = cmp; cmp = out; out = swap; int swpn = cmp_WRITTEN; cmp_WRITTEN = out_WRITTEN; out_WRITTEN = swpn; }
-void prt2cmp() { /*if (out.buf == output_space)*/ swapcmp(); }
-void prt2std() { /*if (out.buf == cmp_space)*/ swapcmp(); }
+//void swapcmp() { span swap = cmp; cmp = out; out = swap; int swpn = cmp_WRITTEN; cmp_WRITTEN = out_WRITTEN; out_WRITTEN = swpn; }
+//void prt2cmp() { if (out.buf == output_space) swapcmp(); }
+//void prt2std() { if (out.buf == cmp_space) swapcmp(); }
+
+//span prt_cmp_stack[1024] = {0};
+//int prt_cmp_stack_n = 0;
+//void prt_cmp() { assert(prt_cmp_stack_n < 1023); prt_cmp_stack[prt_cmp_stack_n++] = out; out = cmp; }
+//void prt_pop() { assert(0 < prt_cmp_stack_n); out = prt_cmp_stack[--prt_cmp_stack_n]; }
+
+void* out2cmp() { void* ret = outp; outp = &cmp; return ret; }
+void out_rst(void* op) { outp = (span*) op; }
 
 void prt(const char * fmt, ...) {
   va_list ap;
@@ -391,11 +429,11 @@ void prt(const char * fmt, ...) {
   char *buffer;
   // we used to use vsprintf here, but that adds a null byte that we don't want
   int n = vasprintf(&buffer, fmt, ap);
-  memcpy(out.end, buffer, n);
+  memcpy(outp->end, buffer, n);
   free(buffer);
-  out.end += n;
-  if (out.buf + BUF_SZ < out.end) {
-    printf("OUTPUT OVERFLOW (%ld)\n", out.end - output_space);
+  outp->end += n;
+  if (outp->buf + BUF_SZ < outp->end) {
+    printf("OUTPUT OVERFLOW (%ld)\n", outp->end - outp->buf);
     exit(7);
   }
   va_end(ap);
@@ -423,57 +461,57 @@ span prs(char * fmt, ...) {
 }
 
 void terpri() {
-  *out.end = '\n';
-  out.end++;
+  *outp->end = '\n';
+  outp->end++;
   if (ALWAYS_FLUSH) flush();
 }
 
 void w_char(char c) {
-  *out.end++ = c;
+  *outp->end++ = c;
 }
 
 void w_char_esc(char c) {
   if (c < 0x20 || c == 127) {
-    out.end += sprintf((char*)out.end, "\\%03o", (u8)c);
+    outp->end += sprintf((char*)outp->end, "\\%03o", (u8)c);
   } else {
-    *out.end++ = c;
+    *outp->end++ = c;
   }
 }
 
 void w_char_esc_pad(char c) {
   if (c < 0x20 || c == 127) {
-    out.end += sprintf((char*)out.end, "\\%03o", (u8)c);
+    outp->end += sprintf((char*)outp->end, "\\%03o", (u8)c);
   } else {
     sp();sp();sp();
-    *out.end++ = c;
+    *outp->end++ = c;
   }
 }
 
 void w_char_esc_dq(char c) {
   if (c < 0x20 || c == 127) {
-    out.end += sprintf((char*)out.end, "\\%03o", (u8)c);
+    outp->end += sprintf((char*)outp->end, "\\%03o", (u8)c);
   } else if (c == '"') {
-    *out.end++ = '\\';
-    *out.end++ = '"';
+    *outp->end++ = '\\';
+    *outp->end++ = '"';
   } else if (c == '\\') {
-    *out.end++ = '\\';
-    *out.end++ = '\\';
+    *outp->end++ = '\\';
+    *outp->end++ = '\\';
   } else {
-    *out.end++ = c;
+    *outp->end++ = c;
   }
 }
 
 void w_char_esc_sq(char c) {
   if (c < 0x20 || c == 127) {
-    out.end += sprintf((char*)out.end, "\\%03o", (u8)c);
+    outp->end += sprintf((char*)outp->end, "\\%03o", (u8)c);
   } else if (c == '\'') {
-    *out.end++ = '\\';
-    *out.end++ = '\'';
+    *outp->end++ = '\\';
+    *outp->end++ = '\'';
   } else if (c == '\\') {
-    *out.end++ = '\\';
-    *out.end++ = '\\';
+    *outp->end++ = '\\';
+    *outp->end++ = '\\';
   } else {
-    *out.end++ = c;
+    *outp->end++ = c;
   }
 }
 
@@ -486,30 +524,21 @@ void wrs_esc(span s) {
 }
 
 void flush() {
-  if (out_WRITTEN < len(out)) {
-    printf("%.*s", len(out) - out_WRITTEN, out.buf + out_WRITTEN);
-    out_WRITTEN = len(out);
+  int *WRITTEN = (output_space < outp->end && outp->end < output_space + BUF_SZ) ? &out_WRITTEN : &cmp_WRITTEN;
+  if (*WRITTEN < len(*outp)) {
+    printf("%.*s", len(*outp) - *WRITTEN, outp->buf + *WRITTEN);
+    *WRITTEN = len(*outp);
     fflush(stdout);
   }
 }
 
 void flush_err() {
-  if (out_WRITTEN < len(out)) {
-    fprintf(stderr, "%.*s", len(out) - out_WRITTEN, out.buf + out_WRITTEN);
-    out_WRITTEN = len(out);
+  int *WRITTEN = (output_space < outp->end && outp->end < output_space + BUF_SZ) ? &out_WRITTEN : &cmp_WRITTEN;
+  if (*WRITTEN < len(out)) {
+    fprintf(stderr, "%.*s", len(*outp) - *WRITTEN, outp->buf + *WRITTEN);
+    *WRITTEN = len(*outp);
     fflush(stderr);
   }
-}
-
-void flush_to(char *fname) {
-  int fd = open(fname, O_CREAT | O_WRONLY | O_TRUNC, 0666);
-  dprintf(fd, "%*s", len(out) - out_WRITTEN, out.buf + out_WRITTEN);
-  //out_WRITTEN = len(out);
-  // reset for constant memory usage
-  out_WRITTEN = 0;
-  out.end = out.buf;
-  //fsync(fd);
-  close(fd);
 }
 
    /*
@@ -626,6 +655,7 @@ span read_file_into_span(char* filename, span buffer) {
   return new_span;
 }
 
+/*
 u8 *save_stack[16] = {0};
 int save_count = 0;
 
@@ -647,6 +677,7 @@ void push(span s) {
 void pop(span *s) {
   s->buf = save_stack[--save_count];
 }
+*/
 
    /*
 take_n is a mutating function which takes the first n chars of the span into a new span, and also modifies the input span to remove this same prefix.
@@ -662,12 +693,21 @@ span take_n(int n, span *io) {
 }
 
 void advance1(span *s) {
-    if (!empty(*s)) s->buf++;
+  if (!empty(*s)) s->buf++;
 }
 
 void advance(span *s, int n) {
-    if (len(*s) >= n) s->buf += n;
-    else s->buf = s->end; // Move to the end if n exceeds span length
+  if (len(*s) >= n) s->buf += n;
+  else s->buf = s->end; // Move to the end if n exceeds span length
+}
+
+void shorten1(span *s) {
+  if (!empty(*s)) s->end--;
+}
+
+void shorten(span *s, int n) {
+  if (n <= len(*s)) s->end -= n;
+  else s->end = s->buf;
 }
 
 int contains(span haystack, span needle) {
@@ -690,6 +730,10 @@ int contains_ptr(span a, span b) {
 
 int starts_with(span a, span b) {
   return len(b) <= len(a) && 0 == memcmp(a.buf, b.buf, len(b));
+}
+
+int ends_with(span a, span b) {
+  return len(b) <= len(a) && 0 == memcmp(a.end - len(b), b.buf, len(b));
 }
 
 span first_n(span s, int n) {
@@ -723,12 +767,11 @@ span trim(span s) {
 }
 
 span concat(span a, span b) {
-  // XXX this approach is incompatible with prt2cmp being already used before the call; need a rethink here
   span ret = {cmp.end};
-  prt2cmp();
+  void* o = out2cmp();
   wrs(a);
   wrs(b);
-  prt2std();
+  out_rst(o);
   ret.end = cmp.end;
   return ret;
 }
@@ -776,12 +819,9 @@ span consume_prefix(span prefix, span *input) {
 The spans arena implementation.
 */
 
-spans spans_alloc(int n);
-int bool_neq(int, int);
-span spanspan(span haystack, span needle);
-int is_one_of(span x, spans ys);
+//spans spans_alloc(int n);
 
-void span_arena_alloc(int sz) {
+/*void span_arena_alloc(int sz) {
   span_arena = malloc(sz * sizeof *span_arena);
   span_arenasz = sz;
   span_arena_used = 0;
@@ -807,6 +847,7 @@ spans spans_alloc(int n) {
   assert(span_arena_used < span_arenasz);
   return ret;
 }
+*/
 
 /* Generic arrays.
 
@@ -828,8 +869,8 @@ For every generic array type that we make, we will have:
 - A setup function T_arena_alloc(N) for the arena, which takes a number (as int) and allocates (using malloc) enough memory for that many of the element type, where T is the array type name.
 - A corresponding T_arena_free().
 - A pair T_arena_push() and T_arena_pop().
-- A function T_alloc(N) which returns T, always having "n" already set.
-- T_push(E) which increments n, complains and exits if cap is reached, and stores the element provided.
+- A function T_alloc(N) which returns a T, having cap of N.
+- T_push(T*,E) which increments n, complains and exits if cap is reached, and stores the element provided.
 
 The implementation makes a single global struct (both the typedef and the singleton instance) that holds the arena state for the array type.
 This includes the arena pointer, the arena size in elements, the number of allocated elements, and a stack of such numbers.
@@ -894,7 +935,7 @@ T T##_alloc(size_t N) { \
     } \
     T result; \
     result.a = T##_arena.arena + T##_arena.allocated; \
-    result.n = N; \
+    result.n = 0; \
     result.cap = N; \
     T##_arena.allocated += N; \
     return result; \
@@ -908,9 +949,21 @@ void T##_push(T* t, E e) { \
     } \
     t->a[t->n++] = e; \
 }
+
+/*
+Our first generic array is spans, which has a stack depth of 256.
+
+*/
+
+MAKE_ARENA(span,spans,256);
+
 /*
 Other stuff.
 */
+
+int bool_neq(int, int);
+span spanspan(span haystack, span needle);
+int is_one_of(span x, spans ys);
 
 span nullspan() {
   return (span){0, 0};
@@ -918,6 +971,46 @@ span nullspan() {
 
 int bool_neq(int a, int b) { return ( a || b ) && !( a && b); }
 
+spans split_commas_ws(span s) {
+  int n_commas = 0;
+  for (int i=0;i<len(s);i++) {
+    if (s.buf[i] == ',') n_commas++;
+  }
+  spans ret = spans_alloc(n_commas + 1);
+  //int idx = 0;
+  while (len(s)) {
+    int comma = find_char(s,',');
+    if (comma < 0) {
+      //ret.a[idx++] = trim(s);
+      spans_push(&ret,trim(first_n(s,comma)));
+      break;
+    } else {
+      spans_push(&ret,trim(first_n(s,comma)));
+      //ret.a[idx++] = trim(first_n(s,comma));
+      s = skip_n(s, comma+1);
+    }
+  }
+  return ret;
+}
+
+spans split_whitespace(span s) {
+  int n_tokens = 0;
+  for (int i=0;i<len(s);i++) {
+    if (!isspace(s.buf[i]) && (i == 0 || isspace(s.buf[i-1]))) n_tokens++;
+  }
+  spans ret = spans_alloc(n_tokens);
+  int idx = 0;
+  while (len(s)) {
+    while (len(s) && isspace(*s.buf)) s.buf++;
+    if (!len(s)) break;
+    span tok = {.buf = s.buf};
+    while (len(s) && !isspace(*s.buf)) s.buf++;
+    tok.end = s.buf;
+    ret.a[idx++] = tok;
+  }
+  ret.n = idx;
+  return ret;
+}
 /* #json
 
 JSON library
@@ -939,7 +1032,8 @@ json json_o();
 json json_a();
 json nulljson();
 
-// inverse
+// extraction
+span json_un_s(json);
 span json_s2s(json,span*,u8*);
 
 // extend
@@ -971,8 +1065,9 @@ json json_parse_prefix_littok(span*);
 int json_is_null(json j) { return !j.s.buf; }
 
 json json_s(span s) {
+  void* out = out2cmp();
   json ret = {0};
-  ret.s.buf = out.end;
+  ret.s.buf = cmp.end;
   prt("\"");
   for (u8* p=s.buf;p<s.end;p++) {
     switch (*p) {
@@ -1001,72 +1096,87 @@ json json_s(span s) {
     }
   }
   prt("\"");
-  ret.s.end = out.end;
+  ret.s.end = cmp.end;
+  out_rst(out);
   return ret;
 }
 
 json json_n(double n) {
-  json ret = {.s = {.buf = out.end }};
+  void *rst = out2cmp();
+  json ret = {.s = {.buf = cmp.end }};
   prt("%F", n);
-  ret.s.end = out.end;
+  ret.s.end = cmp.end;
+  out_rst(rst);
   return ret;
 }
 
 json json_b(int b) {
-  json ret = {.s = {.buf = out.end }};
+  void *rst = out2cmp();
+  json ret = {.s = {.buf = cmp.end }};
   if (b) prt("true"); else prt("false");
-  ret.s.end = out.end;
+  ret.s.end = cmp.end;
+  out_rst(rst);
   return ret;
 }
 
 json json_0() {
-  json ret = {.s = {.buf = out.end }};
+  void *rst = out2cmp();
+  json ret = {.s = {.buf = cmp.end }};
   prt("null");
-  ret.s.end = out.end;
+  ret.s.end = cmp.end;
+  out_rst(rst);
   return ret;
 }
 
 json json_o() {
-  json ret = {.s = {.buf = out.end }};
+  void *rst = out2cmp();
+  json ret = {.s = {.buf = cmp.end }};
   prt("{}");
-  ret.s.end = out.end;
+  ret.s.end = cmp.end;
+  out_rst(rst);
   return ret;
 }
 
 void json_o_extend(json *j, span key, json val) {
+  void *rst = out2cmp();
   u8* keybuf = malloc(len(key));
   u8* valbuf = malloc(len(val.s));
   memcpy(keybuf, key.buf, len(key));
   memcpy(valbuf, val.s.buf, len(val.s));
   span key2 = {keybuf, keybuf + len(key)};
   span val2 = {valbuf, valbuf + len(val.s)};
-  out.end = j->s.end;
+  cmp.end = j->s.end;
   bksp();
-  if (*(out.end - 1) != '{') prt(",");
+  if (*(cmp.end - 1) != '{') prt(",");
   //wrs(key2);
   json_s(key2);
   prt(":");
   wrs(val2);
   prt("}");
-  j->s.end = out.end;
+  j->s.end = cmp.end;
   free(keybuf);
   free(valbuf);
+  out_rst(rst);
 }
 
 json json_a() {
-  json ret = {.s = {.buf = out.end }};
+  void *rst = out2cmp();
+  json ret = {.s = {.buf = cmp.end }};
   prt("[]");
-  ret.s.end = out.end;
+  ret.s.end = cmp.end;
+  out_rst(rst);
   return ret;
 }
 
 void json_a_extend(json *a, json val) {
-  out.end = a->s.end;
+  void *rst = out2cmp();
+  cmp.end = a->s.end;
   bksp();
-  if (*(out.end - 1) != '[') prt(",");
+  if (*(cmp.end - 1) != '[') prt(",");
   wrs(val.s);
   prt("]");
-  a->s.end = out.end;
+  a->s.end = cmp.end;
+  out_rst(rst);
 }
 
 json nulljson() { return (json) {nullspan()}; }
@@ -1133,6 +1243,9 @@ json json_key(span s, json o) {
 
 json make_json(span s) { return (json){s}; }
 
+span json_un_s(json s) {
+  return json_s2s(s, &cmp, cmp_space + BUF_SZ);
+}
 /*
 The `json_parse` function takes a `span` representing the JSON data and returns a `json` type object, unless the parse failed or did not consume the entire input (excepting whitespace) in which case it returns nulljson().
 */
@@ -1235,7 +1348,6 @@ json json_parse_prefix(span *input) {
     ret.s.end = input->buf;
     return ret;
 }
-
 /*
 
 In json_s2s we get a json with .s being a JSON string, and a span pointer to a buffer area, which we will extend, and a max u8* giving the end of the buffer region.
@@ -1426,6 +1538,71 @@ json json_parse_prefix_littok(span *input) {
   if (!empty(inner = consume_prefix(S("null"), input))) return (json){inner};
   return nulljson();
 }
+
+/* #sio
+
+Spanio basics.
+
+Instead of null-terminated strings, we use spans.
+Functions that take string input or output should always use the span type, never char*.
+(We only rarely use char* for talking to C library functions.)
+
+To create a span from a char* use S(): `span s = S("hello world")`.
+
+A span is a struct having a .buf and .end, both u8 pointers.
+
+To get the length of a span, use `len(s)`, or to just check if it is empty use `empty(s)`.
+
+To compare equality of strings, use span_eq(a,b).
+
+for a lexicographic comparison use span_cmp(a,b), returning an int {-,0,+} according to whether {a<b, a==b, a>b}.
+
+You can tell if a span `a` starts or ends with another `b` using starts_with(a,b) and ends_with(a,b).
+
+To get a prefix of a span use first_n(span,int).
+*/
+/* #parserpattern
+
+In parser functions, we are given a span pointer, usually called input.
+
+We either return a value indicating success of some parsed result, and shorten the span (by advancing .buf), or we leave the span untouched and return some distinguished value indicating failure.
+
+Thus the basic parser pattern is a function that takes a span pointer as input, and returns something.
+The success or failure is indicated by the returned value.
+The progress of the parse of the input is indicated by the modification, if any, made to the span that is passed in by reference.
+The input span is gradually consumed by the various parser functions until it is empty, or until the parse fails.
+
+We often use consume_prefix(span,span*) in parsers which consumes a literal prefix, if present, and returns it as span, and shortens the second argument accordingly, or if it is not present, returns an empty span and leaves the second argument unmodified.
+
+We may also use take_n(int,span*), which is similar to first_n in the main spanio functions, but specialized for modifying a span as we do when parsing.
+It takes a bite off the front of the string being parsed.
+It returns a span of the given length pointing to the beginning of the input span, and advances the .buf of that span by the same amount.
+*/
+
+/* #jsonparser
+
+The json parser (and indexing methods) returns a parsed json object that wraps a span containing the actual bytes of input.
+
+This means that if the span parses cleanly as json, the .s of the returned value will be a subset of the input span (in the sense of contains_ptr), i.e. it will point to the same bytes.
+This means that we don't allocate any new memory when parsing, and it also means that (if desired) the consuming function can index the JSON as it is being parsed.
+
+This means that we only wrap spans of the given input, and manually construct json objects to return, rather than calling other constructor functions (e.g. json_b), which will typically point to static strings.
+*/
+/* #json_parse_prefix_littok @sio @jsonlib @parserpattern @jsonparser
+
+Here we parse the three literal tokens, which are "true" "false" and "null".
+
+Write the json json_parse_prefix_littok(span*) function.
+
+
+json json_parse_prefix_littok(span* input) {
+    if (consume_prefix(input, S("true"))) return json_b(1);
+    if (consume_prefix(input, S("false"))) return json_b(0);
+    if (consume_prefix(input, S("null"))) return json_0();
+    return json_is_null(json_0()); // or some other error indication
+}
+
+*/
 /* 
 We do not use null-terminated strings but instead rely on the explicit end point of our span type.
 Here we have spanspan(span,span) which is equivalent to strstr or memmem in the C library but for spans rather than C strings or void pointers respectively.
@@ -1459,11 +1636,18 @@ span spanspan(span haystack, span needle) {
 // Actually a more useful function would return an index or -1, so we don't need another function when we care where the thing is.
 int is_one_of(span x, spans ys) {
   for (int i = 0; i < ys.n; ++i) {
-    if (span_eq(x, ys.s[i])) {
+    if (span_eq(x, ys.a[i])) {
       return 1; // Found
     }
   }
   return 0; // Not found
+}
+
+int index_of(span x, spans ys) {
+  for (int i=0; i<ys.n; i++) {
+    if (span_eq(ys.a[i], x)) return i;
+  }
+  return -1;
 }
 
 /*
