@@ -129,6 +129,8 @@
   ✓ make chase_refs support :code and :all
     ✓ add block_by_id
     ✓ add block_transforms(b,f)
+  ✓ add :expand, :toprefs, :inrefs
+  ✓ add "#" feature
 
 
 
@@ -137,28 +139,35 @@
 
 
 WHAT WE ARE CURRENTLY DOING:
-  → basic diff features "d" for diff (by def. w/ prev rev) of block and "u" (undo)  4 3 12
-      add "U" with a listing, most-recent first
-        checksum and index blocks
-          design how it will work
-        → implement checksums for blocks, lines, files (in #checksum_code)
-          implement checksums for each rev
-        implement rev-chron linear search
-        implement "find previous version of block"
+  → basic diff features
+    → add "U" with a listing, most-recent first
+      → checksum and index blocks
+        ✓ design how it will work
+        ✓ implement checksums for blocks, lines, files (in #checksum_code)
+        ✓ implement checksums for each rev
+      → implement rev-chron linear search
+      → implement "find previous version of block"
 
+        global context block
 
     "Error: Block does not belong to any file." happened
       context: added a space before a "#" in the last markdown block in the last file, then :wq
+    Arena overflow for spans
     actually index block ids
     make "#" jump to block by id (or maybe a menu!)
+    make "@" be a menu of references from this block
+    "@@" or sth is menu of blocks that refer to us
+    automatically suggest regen of stale downstream blocks
+    prt_exit() is probably actually a good idea
+    turn off bootstrap on startup
     explore "prompt palette" idea
     fix the first-line thing on @id:code
     replace spans arena with generic implementation
-    make .n start at 0
+  ✓ make .n start at 0
     keep ollama model loaded
     make LLM calls asynchronous
     clipboard model set automatically
-    rename bootstrap to genesis
+    rename bootstrap to genesis(?) projblock(?) global context block
     add :allfiles to autopopulate conf, and an empty state
     cmprdir should be auto-set
     ~/.cmpr for top-level conf

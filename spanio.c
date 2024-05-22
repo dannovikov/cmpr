@@ -77,12 +77,6 @@ A common idiom in functions returning span: use a span ret declared near the top
 Note that we NEVER write const in C, as this feature doesn't pull its weight.
 There's some existing contamination around library functions but try to minimize the spread.
 
-Sometimes we need a null-terminated C string for talking to library functions, we can use this pattern (with "2048" being replaced by some reasonably generous number appropriate to the specific use case): char buf[2048] = {0}; s_buffer(buf,2048,some_span);.
-This sets up a nice buffer that's sufficiently large, copies the span contents into it with added null terminator, or crashes your program if the buffer was too small.
-This pattern makes it hard to pass a null-terminated string out of a function's scope, but that's perfect anyway, as we prefer to pass spans around anyway.
-Never assume anything is null-terminated.
-Use spans everywhere.
-
 Note that prt() has exactly the same function signature as printf, i.e. it takes a format string followed by varargs.
 We never use printf, but always prt.
 A common idiom when reporting errors is to call prt, flush, and exit.
@@ -95,6 +89,22 @@ A common idiom is next_line() in a loop with !empty().
 In main() or similar it is common to call init_spans and often also read_and_count_stdin.
 */
 
+/* #s_pattern
+
+Note that in general our spans are NOT null-terminated, so casting a span.buf to a char* and hoping for the best in calling C library functions would be very wrong.
+
+When we need a null-terminated C string for talking to library functions, we can use s_buffer().
+We use a local buffer of some suitably generous size, according to the use case.
+For example, when used for a path name we should use PATH_MAX.
+
+Here is an example using a size of 2048:
+
+```
+char buf[2048] = {0};
+s_buffer(buf,2048,some_span);
+... use 'buf' ...
+```
+*/
 /* #jsonlib
 
 JSON support in the spanio library.
@@ -602,6 +612,13 @@ void exit_with_error(char *error_message) {
   exit(EXIT_FAILURE);
 }
 
+/* not really any better for usability I think
+span read_f_into_span(span filename, span* buffer) {
+  span ret = read_file_S_into_span(filename, *buffer);
+  buffer->buf = ret.end;
+}
+*/
+
 span read_file_into_cmp(span filename) {
   span ret = read_file_S_into_span(filename, cmp_compl());
   cmp.end = ret.end;
@@ -982,7 +999,7 @@ spans split_commas_ws(span s) {
     int comma = find_char(s,',');
     if (comma < 0) {
       //ret.a[idx++] = trim(s);
-      spans_push(&ret,trim(first_n(s,comma)));
+      spans_push(&ret,trim(s));
       break;
     } else {
       spans_push(&ret,trim(first_n(s,comma)));

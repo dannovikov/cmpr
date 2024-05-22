@@ -963,7 +963,7 @@ So now we think about what data structures we need.
 - line hashes by block, sorted
 - the "working set" of file revs as we go backward
   - one language per file/rev
-  - the current filename, probably, if we even care(?)
+  - the current filename, probably, if we even care(?) (probably just the index)
   - the rev, of course (the filename)
   - the timestamp, probably converted to Unix time
 - the chronological list of blocks
@@ -1004,3 +1004,69 @@ As seen in the following example:
 
 Sometimes we might want a single block to have multiple ids (when it implements multiple functions).
 Should we support this? Maybe?
+
+
+
+
+
+
+
+
+
+Design notes on `top_refs`
+----
+20240515
+
+Problem statement: we have a block and we want to expand the top refs and the inline refs such that the top refs can be put into a separate LLM message.
+
+Both the top refs and the inline refs need to be expanded recursively.
+
+However, at the 0-level of recursion (in the block itself) we only want to expand the top refs, so that these can be returned separately.
+
+This suggests that we have a function Block -> top expansion, and Block -> body expansion, and Block -> full expansion.
+
+The top-level routine that prepares the LLM call will need to use the first two, to prepare the separate messages.
+The recursive component will always use the full expansion.
+
+When doing body expansion, we want to strip block comment delimiters, so that we aren't putting a block comment inside a block comment.
+
+This means that there is a context within which the recursion needs to operate differently.
+
+So one approach is to parameterize the function, so that it either expands the top, expands the body, expands the entire block, and also so that it either strips or doesn't strip the comment delimiters.
+
+The comment stripping parameter will persist through the downward recursion, but the expansion will always be determined by the transform if any on the reference itself.
+By default it will be a "comment" transform, but we will strip the comment delimiters if we are already in a comment context.
+
+This means that if we are doing a full expansion in a comment context, we need to recursively expand the comment part with delimiter stripping, then the code part.
+
+
+
+
+
+
+
+
+Idea
+----
+20240516
+
+I'm noticing that my `#all_functions` block is kind of unique in an avoidable and bad way.
+
+I constantly have to go back to it and edit it, and that feels wrong.
+Instead, I realize it can easily be generated from my blocks themselves, if I switch how I do things a bit.
+
+Specifically, I can write the name of the function and its signature into the block, as the first line below the top line.
+
+This means I'm always being explicit about the function argument names, or actually I could leave them out.
+
+But I'm being explicit about the function name, but only in the block itself, not in two places.
+And then changes become a lot easier.
+
+The only problem with this is now we need a way to get around the forward reference problem again.
+It shouldn't be hard to extract all the function declarations though, and put them into one place before compiling.
+
+Maybe ctags can even do this for me?
+
+Or we can get GPT to write a Python script for it.
+Which we now have.
+It's a heuristic approach, but all my function declarations are pretty simple.

@@ -126,7 +126,7 @@ So the block size is determined by the amount of code that the LLM can write "in
 
 By default the model is set to "clipboard," which means you will have a ChatGPT (or any model) open in your browser and copy and paste.
 However, we have early support for other models as of v8.
-To use gpt-3.5-turbo or gpt-4-turbo, put your API key in `~/.cmpr/openai_key` and run `chmod 0600 ~/.cmpr/openai_key`.
+To use gpt-3.5-turbo or gpt-4-turbo, put your API key in `~/.cmpr/openai-key` and run `chmod 0400 ~/.cmpr/openai-key`.
 Then in cmpr enter ":model" to get a menu where you can select the model.
 
 To use llama.cpp, you need to run the llama.cpp server, then again use ":model" and choose llama.cpp.

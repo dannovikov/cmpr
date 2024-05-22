@@ -1,5 +1,5 @@
 cmprdir: cmpr
-buildcmd: make debug
+buildcmd: make dev && ctags spanio.c cmpr.c
 bootstrap: ./bootstrap.sh
 cbcopy: xclip -i -selection clipboard
 cbpaste: xclip -o -selection clipboard
@@ -9,12 +9,15 @@ model: clipboard
 
 language: C
 file: conf
-file: Makefile
-file: README.md
-file: systemprompt
 file: cmpr.c
 file: spanio.c
 file: bootstrap.sh
 file: doc/second
+file: Makefile
+
+language: Markdown
+file: systemprompt
 file: DATALOSS.md
+file: README.md
+file: doc/FE.md
 file: doc/plans.txt

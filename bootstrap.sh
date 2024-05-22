@@ -47,9 +47,12 @@ The projfiles type is created by MAKE_ARENA and has the methods defined for our 
 In particular, we use projfiles_alloc with a sufficient capacity in main() and then we use projfiles_push() whenever we populate a project file.
 EOF
 
+echo
 echo "Here are the declarations of all our functions:\n\n\`\`\`c"
 
-cmpr --print-code $(cmpr --find-block "#all_functions")
+#cmpr --print-code $(cmpr --find-block "#all_functions")
+make fdecls.h >/dev/null
+cat fdecls.h
 
 echo "\`\`\`"
 echo "Reply with \"OK\"."

@@ -5,6 +5,7 @@ Here we have a function int add(int, int).
 int add(int a, int b) {
     return a + b;
 }
+
 /* #test_refs @test_block @config_fields
 
 Line one.
@@ -24,6 +25,8 @@ Here's our add function:
 #define _GNU_SOURCE // for memmem
 #include "siphash/siphash.h"
 #include "spanio.c"
+
+#include <dirent.h>
 
 typedef uint64_t u64;
 
@@ -83,10 +86,17 @@ Markdown: There is no comment part, markdown blocks are often all prose.
 
 6. Default block comment to prompt pattern:
 
-C: "```c\n" $COMMENT$ "```\n\nWrite the code. Reply only with code. Do not include comments.\n"
-Python: "```python\n" $COMMENT$ "```\n\nWrite the code. Reply only with code. Avoid code_interpreter.\n"
-JavaScript: "```js\n" $COMMENT$ "```\n\nWrite the code. Reply only with code. Do not include comments.\n"
-Markdown: "$COMMENT$"
+C: "```c\n" $CONTEXT$ "```\n\n(above: references)\n----\n(below: current task)\n\n```c\n" $BODY$ "```\n\nWrite the code. Reply only with code. Do not include comments.\n"
+Python: "```python\n" $CONTEXT$ "```\n\n(above: reference)\n----\n(below: current work)\n\n```python\n" $BODY$ "```\n\nWrite the code. Reply only with code. Avoid code_interpreter.\n"
+JavaScript: "```js\n" $CONTEXT$ "```\n\n(above: reference)\n----\n(below: current work)\n\n```js\n" $BODY$ "```\n\nWrite the code. Reply only with code. Do not include comments.\n"
+Markdown: "$CONTEXT$\n$BODY$"
+
+6b. Shorter comment to prompt pattern when context part is empty:
+
+C: "```c\n" $BODY$ "```\n\nWrite the code. Reply only with code. Do not include comments.\n"
+Python: "```python\n" $BODY$ "```\n\nWrite the code. Reply only with code. Avoid code_interpreter.\n"
+JavaScript: "```js\n" $BODY$ "```\n\nWrite the code. Reply only with code. Do not include comments.\n"
+Markdown: "$BODY$"
 
 7. Prompt pattern name:
 
@@ -160,13 +170,126 @@ typedef struct {
 } projfile;
 
 MAKE_ARENA(projfile, projfiles, 256)
+/* #rope
+
+To support a particular memory allocation and access pattern we have the following interface:
+
+rope rope_new(size_t);
+void rope_release(rope*);
+span rope_alloc_atleast(rope*,size_t);
+
+This is suitable for usage patterns that may consume large amounts of memory, and are orthogonal to other usage patterns, such that an arena allocation strategy is inconvenient to free the memory.
+Furthermore, since we want to support spans pointing into this memory, it needs to be fixed in place once allocated.
+
+The rope is opaque from the perspective of the caller, but it will have a u8 pointer to the allocated memory and two sizes, "used" and "cap", and a pointer to the next segment of the rope.
+(The entire rope is thus a singly-linked list, not to be confused with similar uses of "rope" for balanced trees.)
+
+The memory is only ever extended in our use case until it is freed, so we have a way to ensure that there is at least some quantity of memory available in a contiguous block.
+We only ever write into the last segment, so this method simply scans the segments until it reaches the last one (which has the next pointer set to NULL) and then checks if it has enough unused space for the request.
+If not, it allocates a new segment and extends the rope.
+Regardless, the call then returns a span that points to the unitialized memory.
+(This is different from our usual use of spans as strings.)
+
+Each segment will be a minimum of 32MiB, so when allocating we either allocate a block of this size, or if a larger size was requested, we allocate the requested size.
+
+When the rope is no longer needed, we walk the list and free all the allocated segments in turn.
+*/
+
+#define SEGMENT_SIZE (32 * 1024 * 1024)
+
+typedef struct rope_segment {
+    u8 *memory;
+    size_t used;
+    size_t cap;
+    struct rope_segment *next;
+} rope_segment;
+
+typedef struct rope {
+    rope_segment *head;
+} rope;
+
+rope rope_new(size_t initial_size) {
+    rope r;
+    r.head = (rope_segment *)malloc(sizeof(rope_segment));
+    r.head->cap = initial_size > SEGMENT_SIZE ? initial_size : SEGMENT_SIZE;
+    r.head->used = 0;
+    r.head->memory = (u8 *)malloc(r.head->cap);
+    r.head->next = NULL;
+    return r;
+}
+
+void rope_release(rope *r) {
+    rope_segment *current = r->head;
+    while (current) {
+        rope_segment *next = current->next;
+        free(current->memory);
+        free(current);
+        current = next;
+    }
+    r->head = NULL;
+}
+
+span rope_alloc_atleast(rope *r, size_t size) {
+    rope_segment *current = r->head;
+    while (current->next) {
+        current = current->next;
+    }
+
+    if (current->cap - current->used < size) {
+        size_t new_cap = size > SEGMENT_SIZE ? size : SEGMENT_SIZE;
+        rope_segment *new_segment = (rope_segment *)malloc(sizeof(rope_segment));
+        new_segment->memory = (u8 *)malloc(new_cap);
+        new_segment->used = 0;
+        new_segment->cap = new_cap;
+        new_segment->next = NULL;
+        current->next = new_segment;
+        current = new_segment;
+    }
+
+    span result;
+    result.buf = current->memory + current->used;
+    current->used += size;
+    result.end = current->memory + current->used;
+    return result;
+}
+
 /* #rev_info
 
-This structure holds metadata on our revs, and has the following elements:
+The rev_info structure holds metadata on our revs, and has the following elements:
 
-- filenames, a spans holding paths (under revs/) in rev. lexicographic order (also rev. chronological order)
-- cksums, a checksums which may be only partially populated
+- filenames, a spans holding paths (under revs/) in lexicographic order (also chronological order)
+- fnbuf, a char * holding allocated memory for the filenames
+- revblocks, a chronologically partially-ordered list of historical blocks with metadata
+- n_revblocks, the size of that array
+- revrope, a rope holding the rev contents
+
+For the revblocks we also need a type, so we'll have a rev_block struct as well.
+Then revblocks can be a pointer to a rev_block, and we'll manually manage the memory for it.
+
+On the rev_block struct we need:
+
+- a span for the actual block contents
+- a checksums, sorted_line_cksums, for the sorted line checksums which we use for similarity determination
+- a spans for the zero or more IDs this block may have
+- a timestamp, which we will store in seconds since the epoch as a time_t
+
+Because of the inclusion, we must declare rev_block first, followed by rev_info.
 */
+
+typedef struct {
+    span contents;
+    checksums sorted_line_cksums;
+    spans ids;
+    time_t timestamp;
+} rev_block;
+
+typedef struct {
+    spans filenames;
+    char *fnbuf;
+    rev_block* revblocks;
+    int n_revblocks;
+    rope revrope;
+} rev_info;
 
 /* #ui_state
 
@@ -183,10 +306,11 @@ This includes, so far:
 - the jk_index, the number of "j/k items" prior to the selected one
 - a marked_index, which represent the "other end" of a selected range
 - revs, a rev_info structure which stores metadata about our revision history
+- block_idx, a spans which is an index of block ids
 - the search span which will contain "/" followed by some search if in search mode, otherwise will be empty()
 - the previous search span, used for n/N
 - the ex_command which similarly contains ":" if in ex command entry mode, otherwise empty()
-- the config file path as a span
+- config_file_path, a span
 - terminal_rows and _cols which stores the terminal dimensions
 - scrolled_lines, the number of physical lines that have been scrolled off the screen upwards
 - openai_key, an OpenAI API key, or an empty span
@@ -207,6 +331,8 @@ typedef struct ui_state {
     checksums line_cksums;
     int current_index;
     int marked_index;
+    rev_info revs;
+    spans block_idx;
     span search;
     span previous_search;
     span ex_command;
@@ -238,6 +364,9 @@ typedef struct {
 /* #all_functions #replywithok
 */
 
+#include "fdecls.h"
+
+ /*
 // main loop and input
 void main_loop();
 char getch();
@@ -343,13 +472,12 @@ void print_comment(int);
 void print_code(int);
 int count_blocks();
 void clear_display();
-
+*/
 /* #ingest_functions
 
 When we start, get_code handles everything in the current project files, and get_revs handles all the historical revisions in revs/.
 */
 
-// #ingest
 void get_code(); // read and index current code
 void get_revs(); // read and index revs
 spans find_blocks(span); // find the blocks in a file
@@ -358,6 +486,7 @@ void find_blocks_in(span content, span language); // might be implemented, and u
 checksum selected_checksum(span); // our selected checksum implementation
 void checksum_code(); // called by get_code to checksum blocks, lines, and files
 void find_all_lines(); // like find_all_blocks, but for lines; applies to the whole project
+void index_block_ids();
 /* #main
 
 In main,
@@ -395,7 +524,7 @@ This function reads the files indicated by our config file, populates inp, and h
 
 Next we call get_revs(), which handles reading and indexing all of our revisions (in <cmprdir>/revs).
 
-We call bootstrap(), which updates the bootstrap prompt.
+@- We call bootstrap(), which updates the bootstrap prompt.
 
 Then we call main_loop().
 
@@ -423,7 +552,7 @@ int main(int argc, char** argv) {
     check_dirs();
     get_code();
     get_revs();
-    bootstrap();
+    //bootstrap();
     main_loop();
 
     flush();
@@ -1261,9 +1390,7 @@ For each of the projfiles:
 - we read this file into inp by read_file_S_into_span with inp_compl() as the span argument, always advancing inp as usual in this pattern so we don't overwrite the contents
 - we store the contents on the projfile
 
-Then we call find_all_blocks(), which sets up the blocks according to each file's contents and language.
-
-We call checksum_blocks() which additionally checksums each block, line, and file.
+Then we call ingest, which handles everything downstream of getting the bytes into memory.
 */
 
 void get_code() {
@@ -1272,9 +1399,223 @@ void get_code() {
         inp.end = state->files.a[i].contents.end; // Advance inp to not overwrite contents
     }
 
+    ingest();
+}
+
+/* #ingest
+
+void ingest();
+
+Here we handle all indexing operations that have to be done or re-done every time the data in inp (i.e. all the code in the project) changes.
+
+We call:
+- find_all_blocks(), which sets up the blocks according to each file's contents and language, 
+- find_all_lines(), which simply finds the newlines and creates an index of lines,
+- index_block_ids(), which sets up the index of block ids,
+- checksum_code(), which checksums each block, line, and file.
+*/
+
+void ingest() {
     find_all_blocks();
     find_all_lines();
+    index_block_ids();
     checksum_code();
+}
+
+/* #blocks
+
+Block basics.
+
+Blocks live on state, and they are a spans, so .n gives their number and state->blocks.a[n] accesses the nth block as a span.
+
+
+Block IDs:
+
+The ID of a block is defined as any string starting with '#', up to the next whitespace character, on the top line of a block.
+We always tokenize the top line by whitespace.
+
+Despite the name, blocks can have more than one id, for example (using "[[" as stand-in for the actual block comment start delimiter):
+
+[[ #id1 #id2 @ref1 @ref2
+
+As a special case, markdown blocks always begin with "#" and they do not have ids.
+*/
+/* #index_block_ids @blocks
+
+void index_block_ids();
+
+We set up the block index on state by iterating over blocks and finding all block ids, defined above.
+
+We need two loops, since spans_push does not reallocate, so we need the exact count before we call spans_alloc.
+
+Markdown blocks have a first line starting with "#" and we do not assign them any IDs at all.
+
+Hints: next_line, split_whitespace
+*/
+
+void index_block_ids() {
+    int id_count = 0;
+    for (int i = 0; i < state->blocks.n; i++) {
+        span block = state->blocks.a[i];
+        span line = next_line(&block);
+        if (line.buf[0] != '#') {
+            spans tokens = split_whitespace(line);
+            for (int j = 0; j < tokens.n; j++) {
+                if (tokens.a[j].buf[0] == '#') {
+                    id_count++;
+                }
+            }
+        }
+    }
+
+    state->block_idx = spans_alloc(id_count);
+
+    for (int i = 0; i < state->blocks.n; i++) {
+        span block = state->blocks.a[i];
+        span line = next_line(&block);
+        if (line.buf[0] != '#') {
+            spans tokens = split_whitespace(line);
+            for (int j = 0; j < tokens.n; j++) {
+                if (tokens.a[j].buf[0] == '#') {
+                    spans_push(&state->block_idx, tokens.a[j]);
+                }
+            }
+        }
+    }
+}
+
+/* #ids_for_block @index_block_ids:all
+
+spans ids_for_block(span);
+
+This is similar to index_block_ids, except that we are not doing it for all blocks, but for a single block passed in.
+*/
+
+spans ids_for_block(span block) {
+    int id_count = 0;
+    span block_copy = block;
+    span line = next_line(&block_copy);
+    if (line.buf[0] != '#') {
+        spans tokens = split_whitespace(line);
+        for (int j = 0; j < tokens.n; j++) {
+            if (tokens.a[j].buf[0] == '#') {
+                id_count++;
+            }
+        }
+    }
+
+    spans ids = spans_alloc(id_count);
+
+    line = next_line(&block);
+    if (line.buf[0] != '#') {
+        spans tokens = split_whitespace(line);
+        for (int j = 0; j < tokens.n; j++) {
+            if (tokens.a[j].buf[0] == '#') {
+                spans_push(&ids, tokens.a[j]);
+            }
+        }
+    }
+
+    return ids;
+}
+
+/* #block_idx @blocks
+
+Our block id indexing strategy is a bit clever.
+
+Because spans have a location, we simply store a spans containing all block ids, where those spans are in-place, i.e. they actually point not just to any span containing that id, but to the actual location in the block of the id "hashtag" string.
+
+This is defined as any string starting with '#', up to the next whitespace character, on the top line of a block.
+
+Then to look up a block by id, we simply scan the block_idx (on state), and find the first match, and then we use block_for_span to find the block index of that block.
+
+Our contains_ptr library function facilitates this kind of usage of spans.
+
+Despite the name, blocks can have more than one id, for example (using "[[" as stand-in for the actual block comment start delimiter):
+
+[[ #id1 #id2 @ref1 @ref2
+
+So to find the total number of block ids it's necessary to scan all the blocks, and to find the ids for a block we tokenize by whitespace and then examine all the tokens.
+*/
+
+/* #block_for_span
+
+int block_for_span(span);
+
+Of the blocks on state, we find the one containing a given span, using contains_ptr.
+(This is not textual inclusion, but rather we are finding the block, if any, that literally contains the memory the span is pointing at.)
+
+If no match we return -1.
+*/
+
+int block_for_span(span s) {
+    for (int i = 0; i < state->blocks.n; i++) {
+        if (contains_ptr(state->blocks.a[i], s)) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+/* #id_for_block
+
+span id_for_block(span);
+
+Though blocks may have more than one id, here we just return the first one.
+A block id is defined as a token on the top line of the block that starts with '#'.
+
+Hints: next_line, split_whitespace
+*/
+
+span id_for_block(span block) {
+    span line = next_line(&block);
+    spans tokens = split_whitespace(line);
+    for (int i = 0; i < tokens.n; i++) {
+        if (tokens.a[i].buf[0] == '#') {
+            return tokens.a[i];
+        }
+    }
+    return nullspan();
+}
+
+/* #currentblock
+
+The current block is always set.
+The index of the block is current_index on the state.
+To get the block as a span the current index is used with state->blocks.
+It is never necessary to bounds-check current_index as it is known to always be in range (and if not, we should crash anyway).
+*/
+/* @block_idx @id_for_block
+
+void block_id_jump();
+
+To support the "#" jump list we use select_menu on the block_idx itself.
+
+We get the block id for the current block, if there is one, find it on block_idx by a linear search and pass that index into select_menu, otherwise we use 0.
+
+If the user cancels the change, select_menu will return -1, and we do nothing.
+Otherwise we index back into block_idx, and use block_for_span to get the matching block, and we set current_index to it.
+If we set current_index, we also must remember to reset the pagination by zeroing scrolled_lines.
+
+@currentblock
+*/
+
+void block_id_jump() {
+    span current_block = state->blocks.a[state->current_index];
+    span id = id_for_block(current_block);
+    int idx = 0;
+
+    if (!empty(id)) {
+        idx = index_of(id, state->block_idx);
+        if (idx == -1) idx = 0;
+    }
+
+    idx = select_menu(state->block_idx, idx);
+    if (idx != -1) {
+        span selected_id = state->block_idx.a[idx];
+        state->current_index = block_for_span(selected_id);
+        state->scrolled_lines = 0;
+    }
 }
 
 /*
@@ -1297,11 +1638,430 @@ This avoids the possibility of collisions between a string and its literal hash 
 We have an average line length of 39 bytes in our code to date, so we would expand the data by roughly 50% by hashing every line.
 */
 
-/* #get_revs
+/* #get_revdir
+
+span get_revdir();
+
+We take the cmprdir from the state and append "/revs" to it.
+Use concat and s_buffer, with a `static char buf[2048]`.
+*/
+
+span get_revdir() {
+    static char buf[2048] = {0};
+    span revs = S("/revs");
+    span revdir = concat(state->cmprdir, revs);
+    s_buffer(buf, 2048, revdir);
+    return S(buf);
+}
+/* #complain_and_exit
+
+"Complain and exit" is not a the name of a function, but a name for a common pattern.
+Generally, when things go wrong with C library functions, such as not being able to open files, allocate memory, or something that indicates programmer (not user) error, we "complain and exit".
+This means prt, flush, exit(n>0).
+When files are involved, always report the relevant filename or path in the message, not only the OS error.
+(This is why we use prt directly, so that relevant information is more easily included.)
+*/
+
+/* #complain_and_prompt
+
+@- Similar to "complain and exit", but sometimes we want to continue.
+@- Sometimes we have recoverable errors, usually due to user error or misconfiguration.
+When something goes wrong, we want to allow the user to see what happened but still continue.
+When files are involved, we always report the filename or path in the message.
+We use the "Press any key to continue..." message on its own line.
+Then we flush and getch before returning.
+*/
+/* #get_revs @rev_info @get_revdir:code @complain_and_exit
+
+This is similar to get_code, but for revs instead of the current versions of each file.
+
+First, using the usual C functions opendir, readdir, and closedir with a DIR*, we open the revs directory, and iterate over it once to get the number of files.
+
+We add 8 to this number, and allocate a spans of that size to hold the filenames.
+
+(The files have the format YYYYMMDD-hhmmss, which is 15 chars, plus a null terminator.)
+
+Then we allocate a char buffer of size 16 times this number to hold the files, using malloc.
+We store the address of this buffer on the rev info struct.
+(All our spans will point into this memory.)
+
+Then we iterate over the directory again.
+For each file, we ensure that it matches the pattern of 8 digits, a dash, and 6 more digits.
+(If not, we simply ignore it and continue iterating.)
+We write the filename into our filenames buffer, and then construct a span that points to that filename, including the null terminator, and add that to our filename spans array on state->revs.
+
+Next we write a comparator function to use with qsort, which compares to spans using span_cmp.
+(Note that span_cmp does not have the required signature for use with qsort; write a wrapper function directly before the call to qsort that does.)
+We use qsort to sort all the filename spans lexicographically (which is also chronologically, due to our naming scheme).
+
+@- Finally, we print the filenames one per line using wrs and terpri, flush, and exit.
+@- Instead, just going to call get_revs_2 manually and work on the next step.
+*/
+
+void get_revs() {
+    span revdir = get_revdir();
+    DIR *dir = opendir(s(revdir));
+    if (!dir) {
+        prt("Cannot open revs directory: %s\n", s(revdir));
+        flush();
+        exit(1);
+    }
+
+    int file_count = 0;
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL)
+        file_count++;
+
+    closedir(dir);
+    file_count += 8;
+    state->revs.filenames = spans_alloc(file_count);
+
+    size_t buf_size = 16 * file_count;
+    state->revs.fnbuf = (char *)malloc(buf_size);
+    if (!state->revs.fnbuf) {
+        prt("Memory allocation failed for filenames buffer\n");
+        flush();
+        exit(1);
+    }
+
+    char *buf_ptr = state->revs.fnbuf;
+    dir = opendir(s(revdir));
+    if (!dir) {
+        prt("Cannot reopen revs directory: %s\n", s(revdir));
+        flush();
+        exit(1);
+    }
+
+    while ((entry = readdir(dir)) != NULL)
+    {
+        if (strlen(entry->d_name) == 15 && isdigit(entry->d_name[0]) && isdigit(entry->d_name[1]) &&
+            isdigit(entry->d_name[2]) && isdigit(entry->d_name[3]) && isdigit(entry->d_name[4]) &&
+            isdigit(entry->d_name[5]) && isdigit(entry->d_name[6]) && isdigit(entry->d_name[7]) &&
+            entry->d_name[8] == '-' && isdigit(entry->d_name[9]) && isdigit(entry->d_name[10]) &&
+            isdigit(entry->d_name[11]) && isdigit(entry->d_name[12]) && isdigit(entry->d_name[13]) &&
+            isdigit(entry->d_name[14]))
+        {
+            strcpy(buf_ptr, entry->d_name);
+            state->revs.filenames.a[state->revs.filenames.n++] = S(buf_ptr);
+            buf_ptr += 16;
+        }
+    }
+
+    closedir(dir);
+
+    int span_cmp_wrapper(const void *a, const void *b)
+    {
+        return span_cmp(*(span *)a, *(span *)b);
+    }
+
+    qsort(state->revs.filenames.a, state->revs.filenames.n, sizeof(span), span_cmp_wrapper);
+
+    /*
+    for (size_t i = 0; i < state->revs.filenames.n; i++)
+    {
+        wrs(state->revs.filenames.a[i]);
+        terpri();
+    }
+
+    flush();
+    exit(0);
+    */
+    get_revs_2();
+}
+
+/* #read_file_into @rope:code
+
+span read_file_into(span filename, rope*);
+
+We implement read_file_into using C library functions.
+We open the file, get the size, call the rope_alloc_atleast function, and read the file into the span provided.
+We expect that the files that we are reading are quiescent, so we do not expect that they will grow inbetween these calls; if they do, it is OK for us to crash with an informative error message.
+
+@s_pattern
+
+The rope will have already indicated that the memory is used, so all we need to do is adjust the span size, if necessary, to conform to the data read from the file, and return the span.
+*/
+
+span read_file_into(span filename, rope *r) {
+    char buf[PATH_MAX] = {0};
+    s_buffer(buf, PATH_MAX, filename);
+
+    FILE *file = fopen(buf, "rb");
+    if (!file) {
+        prt("Failed to open file: %s\n", buf);
+        flush();
+        exit(1);
+    }
+
+    fseek(file, 0, SEEK_END);
+    size_t file_size = ftell(file);
+    fseek(file, 0, SEEK_SET);
+
+    span file_span = rope_alloc_atleast(r, file_size);
+    size_t read_size = fread(file_span.buf, 1, file_size, file);
+    if (read_size != file_size) {
+        prt("Error reading file: %s\n", buf);
+        flush();
+        exit(1);
+    }
+
+    file_span.end = file_span.buf + read_size;
+    fclose(file);
+
+    return file_span;
+}
+
+/* #get_revs_2 @rev_info:all @rope
+@- likely will be renamed
+
+void get_revs_2();
+
+We have already a sorted list of revisions.
+That is, the filenames are already populated on the rev_info struct on state.
+However, the revblocks are not.
+
+We want, for each rev, a sorted list of line hashes for that rev, which we will then use to identify the best matching file, to pick the language to blockize, and then create our chronological sequence of block revs, which we will in turn use for the "U" feature.
+
+We will later probably optimize this to lazily access all revs as needed.
+However, for now we will process them all at once.
+
+First we take the current set of files and for each we generate a sorted list of line hashes.
+To hold this we will malloc an array of n of the checksums type, where n is the number of projfiles.
+We will maintain this list as we go backwards, correlating each of the projfile indices with the best current match from the revs.
+We call this the "working set".
+We will free it when we return, since we don't need these checksums outside this function.
+
+So in get_revs_2 we first allocate memory for our sorted checksum arrays, one checksums array per projfile.
+Then we use sorted_line_checksums to get the sorted checksums and populate this.
+
+Then we iterate over the revs themselves, in reverse order.
+
+There is a rope on the rev info which we first must initialize (size = 32MiB).
+For each rev, in reverse order, we first read into the rope using read_file_into.
+We have the basenames (on `filenames`) but we need to prepend the revdir using prs with "%.s/revs/%.s" with state->cmprdir and the given basename.
+Our rev block spans will point into this rope's memory.
+We DO NOT release the rope here.
+
+If the rev file is empty, it contains no blocks and we skip it.
+Otherwise we compare it against the working set.
+Whichever of the working set has the best match (the highest intersection) with the rev we take as indicating the language.
+In the event of a tie, we do not care which is used.
+If there is no match, we just skip the rev.
+
+Since the indexes of the working set match the projfiles, we can use the .language on the projfile with the same index.
+
+We then use find_blocks_language to get the blocks, assuming that language, for the rev.
+
+Finally, we will populate the rev_info structure with each of the blocks from that rev.
+Once we have gotten the blocks, we can realloc the revblocks if necessary to have room for the blocks from that rev.
+
+For each rev block we must store:
+- a timestamp,
+- a spans of ids,
+- sorted checksums of lines,
+- the contents.
+
+The timestamp for each block comes from the filename for the rev.
+We have another function to get a time_t from the filenames (which follow a consistent format).
+
+Note that as we are going through the revs in reverse chronological order, that is the order our rev blocks are stored in.
+
+We use sorted_line_checksums on each block, as this will be used to compare the blocks for equality.
+
+We also have a function to get the ids for the block.
+*/
+
+void get_revs_2() {
+    int i, j;
+    rope r = rope_new(32 * 1024 * 1024);
+    checksums* working_set = malloc(sizeof(checksums) * state->files.n);
+    
+    for (i = 0; i < state->files.n; ++i) {
+        working_set[i] = sorted_line_checksums(state->files.a[i].contents);
+    }
+    
+    for (i = state->revs.filenames.n - 1; i >= 0; --i) {
+        span rev_file = prs("%.*s/revs/%.*s", len(state->cmprdir), state->cmprdir.buf, len(state->revs.filenames.a[i]), state->revs.filenames.a[i].buf);
+        span content = read_file_into(rev_file, &r);
+        
+        if (empty(content)) continue;
+        
+        int best_match = -1, best_intersection = -1;
+        for (j = 0; j < state->files.n; ++j) {
+            int intersection = cksums_intersection(working_set[j], sorted_line_checksums(content));
+            if (intersection > best_intersection) {
+                best_intersection = intersection;
+                best_match = j;
+            }
+        }
+        
+        if (best_match == -1) continue;
+        
+        span language = state->files.a[best_match].language;
+        spans blocks = find_blocks_language(content, language);
+        
+        state->revs.revblocks = realloc(state->revs.revblocks, sizeof(rev_block) * (state->revs.n_revblocks + blocks.n));
+        
+        for (j = 0; j < blocks.n; ++j) {
+            state->revs.revblocks[state->revs.n_revblocks + j].contents = blocks.a[j];
+            state->revs.revblocks[state->revs.n_revblocks + j].sorted_line_cksums = sorted_line_checksums(blocks.a[j]);
+            state->revs.revblocks[state->revs.n_revblocks + j].ids = ids_for_block(blocks.a[j]);
+            state->revs.revblocks[state->revs.n_revblocks + j].timestamp = parse_rev_fname(state->revs.filenames.a[i]);
+        }
+        
+        state->revs.n_revblocks += blocks.n;
+    }
+    
+    free(working_set);
+}
+
+/* #select_block_version @rev_info:code @blocks @checksums:code
+
+void select_block_version();
+
+We get the sorted checksums for the current block by calling a function.
+
+(The sorted checksums are also unique.)
+
+Then we go back through the revblocks (on state->revs).
+
+(That is, actually, we are going forward through the list, but as they are in reverse chronological order, this is backwards in time.)
+
+For each of the rev blocks, we print three numbers: the number of unique lines from the current block, the number of unique lines from the rev block, and the intersection (which we have a function to find).
+(The unique line counts are just .n on the respective sorted checksums.)
+
+If each of the three numbers is greater than 8, then we store this block as a probable match.
+If this probable match is different (per span_eq) from the previous probably match, then we print it with wrs.
+
+@press_any_key
 
 */
 
-void get_revs() {}
+void select_block_version() {
+    checksums current_sorted_cksums = sorted_line_checksums(state->blocks.a[state->current_index]);
+    int prev_idx = -1;
+
+    for (int i = 0; i < state->revs.n_revblocks; i++) {
+        rev_block* rb = &state->revs.revblocks[i];
+        int current_unique = current_sorted_cksums.n;
+        int rev_unique = rb->sorted_line_cksums.n;
+        int intersection = cksums_intersection(current_sorted_cksums, rb->sorted_line_cksums);
+
+        if (current_unique > 8 && rev_unique > 8 && intersection > 8) {
+            span rev_block_span = rb->contents;
+            if (prev_idx == -1 || !span_eq(state->revs.revblocks[prev_idx].contents, rev_block_span)) {
+                wrs(rev_block_span);
+
+                prt("Press any key to continue...");
+                flush();
+                getch();
+
+                prev_idx = i;
+            }
+        }
+    }
+}
+
+/* @checksums
+checksums sorted_line_checksums(span);
+
+In a first pass we count the lines in the input.
+We allocate a checksums of this many.
+Then we take lines one by one, get the selected checksum for each one, and add it to the checksums.
+
+We sort the checksums using qsort.
+For this we need to declare a comparator function inline, handling the void* type that qsort expects.
+
+We remove duplicates by keeping track of an offset and overwriting forward in a single pass over the sorted list.
+*/
+
+checksums sorted_line_checksums(span input) {
+    int line_count = 0;
+    span temp = input;
+    while (!empty(temp)) {
+        next_line(&temp);
+        line_count++;
+    }
+
+    checksums cksums = checksums_alloc(line_count);
+    temp = input;
+    while (!empty(temp)) {
+        span line = next_line(&temp);
+        checksum cksum = selected_checksum(line);
+        checksums_push(&cksums, cksum);
+    }
+
+    int checksum_cmp(const void* a, const void* b) {
+        const checksum* cksum1 = (const checksum*)a;
+        const checksum* cksum2 = (const checksum*)b;
+        return (cksum1->__u > cksum2->__u) - (cksum1->__u < cksum2->__u);
+    }
+
+    qsort(cksums.a, cksums.n, sizeof(checksum), checksum_cmp);
+
+    int offset = 0;
+    for (int i = 1; i < cksums.n; i++) {
+        if (cksums.a[i].__u != cksums.a[offset].__u) {
+            offset++;
+            cksums.a[offset] = cksums.a[i];
+        }
+    }
+    cksums.n = offset + 1;
+
+    return cksums;
+}
+
+/* #cksums_intersection @checksums
+
+int cksums_intersection(checksums,checksums);
+
+We are given two checksums, a and b, which will be sorted.
+
+We return in linear time the count of checksums appearing in both lists, i.e. the intersection.
+
+To do this we iterate over both of the arrays in parallel, advancing whichever is lower when they are not equal, and when they are equal, advancing our intersection count and advancing both of them.
+*/
+
+int cksums_intersection(checksums a, checksums b) {
+    int i = 0, j = 0, intersection_count = 0;
+
+    while (i < a.n && j < b.n) {
+        if (a.a[i].__u < b.a[j].__u) {
+            i++;
+        } else if (a.a[i].__u > b.a[j].__u) {
+            j++;
+        } else {
+            intersection_count++;
+            i++;
+            j++;
+        }
+    }
+
+    return intersection_count;
+}
+
+/* @new_rev
+time_t parse_rev_fname(span);
+
+We get a filename, only the basename part, in the format described above, and parse it into a time_t.
+*/
+
+time_t parse_rev_fname(span basename) {
+    struct tm tm_info = {0};
+    char buf[16] = {0};
+    
+    s_buffer(buf, 9, first_n(basename, 8));
+    strptime(buf, "%Y%m%d", &tm_info);
+
+    advance(&basename, 9);
+    memset(buf, 0, sizeof(buf));
+
+    s_buffer(buf, 7, first_n(basename, 6));
+    strptime(buf, "%H%M%S", &tm_info);
+    
+    return mktime(&tm_info);
+}
+
 /*
 In find_blocks_language_python, we get a span containing a file.
 
@@ -1842,22 +2602,26 @@ void print_multiple_partial_blocks(int start_block, int end_block) {
   prt("%d blocks (printing multiple blocks coming soon!)\n", end_block - start_block);
 }
 
-/* #handle_keystroke
+/* #handle_keystroke #keybinds
 
-In handle_keystroke, we support the following single-char inputs:
+void handle_keystroke(char);
+
+We support the following single-char inputs:
 
 - j/k Go up or down one block. If we are at the first or last block, these are no-ops.
 - g/G Go to the first or last block resp.
 - e, Edit the current block in $EDITOR (or vi by default)
 - r, Request an LLM rewrite the code part of the block based on the comment part; silently updates clipboard
 - R, kin to "r", which reads current clipboard contents back into the block, replacing the code part
-IGNORE: - u, undo
+@- - u, undo
+- U, List versions of current block
 - space/b, paginate down or ("back") up within a block
 - B, do a build by running the build command you provide
-IGNORE: - v, sets the marked point to the current index, switching to "visual" selection mode, or leaves visual mode if in it
+@- - v, sets the marked point to the current index, switching to "visual" selection mode, or leaves visual mode if in it
 - /, switches to search mode
 - :, switches to ex command line
 - n/N, repeat search in forward/backward direction
+- #, opens block id jump list
 - ?, display brief help about the keyboard shortcuts available
 - q, exits (prt "goodbye\n", flush, exit)
 
@@ -1907,6 +2671,9 @@ void handle_keystroke(char input) {
         case 'u':
             //rev_decr();
             break;
+        case 'U':
+            select_block_version();
+            break;
         case ' ':
             page_down();
             break;
@@ -1932,6 +2699,9 @@ void handle_keystroke(char input) {
         case 'N':
             search_backward();
             state->scrolled_lines = 0;
+            break;
+        case '#':
+            block_id_jump();
             break;
         case '?':
             keyboard_help();
@@ -2100,11 +2870,11 @@ The ex commands are defined as a table:
 
 1. Supported ex commands:
 
-:bootstrap, :config, :addfile, :addlib, :allfiles, :help, :model, :expandrefs
+:bootstrap, :config, :addfile, :addlib, :allfiles, :help, :model, :expand, :toprefs, :inrefs
 
 2. Implementation functions:
 
-bootstrap(), addfile(span), addlib(span), ex_help(), select_model(), ex_expandrefs()
+bootstrap(), addfile(span), addlib(span), ex_help(), select_model(), ex_expand(), ex_toprefs(), ex_inrefs()
 
 3. Arguments:
 
@@ -2134,8 +2904,14 @@ help:
 model:
   Select the LLM to use for "r" and other commands.
 
-expandrefs:
+expand:
   Expands block references and displays the expanded result.
+
+toprefs:
+  Expands and displays the top-line block references in a single markdown code block.
+
+inrefs:
+  Expands and displays this block with inline block references expanded.
 */
 /* #handle_ex_command @extable
 
@@ -2159,8 +2935,12 @@ void handle_ex_command() {
         ex_help();
     } else if (starts_with(state->ex_command, S(":model"))) {
         select_model();
-    } else if (span_eq(state->ex_command, S(":expandrefs"))) {
-        ex_expandrefs();
+    } else if (span_eq(state->ex_command, S(":expand"))) {
+        ex_expand();
+    } else if (span_eq(state->ex_command, S(":toprefs"))) {
+        ex_toprefs();
+    } else if (span_eq(state->ex_command, S(":inrefs"))) {
+        ex_inrefs();
     }
     state->ex_command = nullspan();
 }
@@ -2170,18 +2950,24 @@ In ex_help we print the help messages given in #extable Col. 4 above.
 
 Start with a newline, as the cursor will still be on the ex command line (from :help).
 
+Each line should have the format ":command - $help_message$".
+
 We flush and then getch() so the user can see it before returning to the main loop.
 We prompt the user with "Press any key to continue...".
 */
 
 void ex_help() {
-    prt("\nbootstrap: Run the user-provided bootstrap command, putting the result on the clipboard.\n");
-    //prt("config: Edit and reload the config file.\n");
-    //prt("addfile, addlib: Add a file or library to the project (adds file: or lib: line to conf).\n");
-    //prt("allfiles: Adds all the files in the project directory to the conf file.\n");
-    prt("help: Print short help on available ex commands.\n");
-    prt("model: Select the LLM to use for \"r\" and other commands.\n");
-    prt("expandrefs: Expands block references and displays the expanded result.\n");
+    prt("\n");
+    prt(":bootstrap - Run the user-provided bootstrap command, putting the result on the clipboard.\n");
+    //prt(":config - Edit and reload the config file.\n");
+    //prt(":addfile - Add a file to the project (adds file: line to conf).\n");
+    //prt(":addlib - Add a library to the project (adds lib: line to conf).\n");
+    //prt(":allfiles - Adds all the files in the project directory to the conf file.\n");
+    prt(":help - Print short help on available ex commands.\n");
+    prt(":model - Select the LLM to use for \"r\" and other commands.\n");
+    prt(":expand - Expands block references and displays the expanded result.\n");
+    prt(":toprefs - Expands and displays the top-line block references in a single markdown code block.\n");
+    prt(":inrefs - Expands and displays this block with inline block references expanded.\n");
     flush();
     prt("Press any key to continue...");
     flush();
@@ -2203,44 +2989,88 @@ void reset_highlight() {
 
 /* #print_menu
 
-Here we show the user a list of a small number of options, with the currently selected one highlighted.
+void print_menu(spans,int);
+
+Here we show the user a list of options, and let them pick one.
 
 Our arguments are a spans containing the options and a currently selected index into it.
 
-We clear the display, print the options, highlighting the selected one, and then print a message:
+First we clear the display.
 
-"Use j/k or Up/Down to move and Enter to select."
+We check the terminal height (from the state) and compare it to the number of options we've been given.
+We also need to leave one row at the bottom for the instruction to the user.
+
+We want to always have the selected option at the same row on the terminal.
+First we find this row.
+We take the total terminal rows, subtract one for the prompt line, and one for the selected row itself, and then take half of this.
+That's the number of lines that we want to fill before we print the selected option, and also the max that we can fill after it.
+
+To fill this space, we might have exactly enough options (prior to the selected one), or not enough, or too many.
+
+If there are too many or exactly enough, we skip any initial options that we need to skip.
+If there are not enough, we as many blank lines as necessary.
+
+Then we print the options prior to the selected one.
+Then we print the selected one.
+Finally we print the rest of the options, up to the max we can fit.
+Then we move the cursor to the last line with an escape code, and print the user prompt, without a newline:
+
+"Use j/k or Up/Down to move, Enter to select, and q to exit without change."
 
 @set_highlight
 */
 
-void print_menu(spans options, int selected_index) {
+void print_menu(spans opts, int sel) {
     clear_display();
 
-    for (int i = 0; i < options.n; ++i) {
-        if (i == selected_index) {
-            set_highlight();
-            prt("%.*s\n", len(options.a[i]), options.a[i].buf);
-            reset_highlight();
-        } else {
-            prt("%.*s\n", len(options.a[i]), options.a[i].buf);
-        }
+    int term_rows = state->terminal_rows;
+    int num_opts = opts.n;
+    int prompt_line = 1;
+    int sel_row = (term_rows - prompt_line - 1) / 2;
+    int max_above = sel_row;
+
+    int start = sel > max_above ? sel - max_above : 0;
+    int end = start + term_rows - prompt_line - 1;
+
+    if (end > num_opts) {
+        end = num_opts;
+        start = end - term_rows + prompt_line + 1;
+        if (start < 0) start = 0;
     }
 
-    prt("Use j/k or Up/Down to move and Enter to select.\n");
+    for (int i = 0; i < start; i++) terpri();
+
+    for (int i = start; i < sel; i++) {
+        prt("%.*s\n", len(opts.a[i]), opts.a[i].buf);
+    }
+
+    set_highlight();
+    prt("%.*s\n", len(opts.a[sel]), opts.a[sel].buf);
+    reset_highlight();
+
+    for (int i = sel + 1; i < end; i++) {
+        prt("%.*s\n", len(opts.a[i]), opts.a[i].buf);
+    }
+
+    while (end++ < term_rows - prompt_line) terpri();
+
+    prt("Use j/k or Up/Down to move, Enter to select, and q to exit without change.");
     flush();
 }
 
 /* #select_menu
 
+int select_menu(spans,int);
+
 In select_menu we allow the user to choose from a small list of options passed in as a spans.
-The currently selected option is passed in as an int.
+The currently selected option is passed in as an int, or -1 if there is no current selection.
 
 We have a helper function print_menu which takes a spans of the options and a currently selected index and handles the screen updates.
 
-We enter a loop, handle j/k and up/down arrow keys to highlight and enter for selecting.
+We enter a loop, handle j/k and up/down arrow keys to highlight, enter for selecting, and q to exit without selecting anything, which we indicate by returning -1.
+@- Someday we'll probably add Esc support here, see #escape_handling_issue.
 
-Recall that arrow keys are represented as multiple characters of input so you'll need to maintain some state to handle them correctly.
+Arrow keys are represented as multiple characters of input so you'll need to maintain some state to handle them correctly.
 In particular, if you ever write something like '\033[B' it won't compile, so use nested calls to getch(), or maintain a small state machine as an int.
 
 We return the index of the user's selection.
@@ -2255,6 +3085,8 @@ int select_menu(spans options, int selected_index) {
             case '\033':
                 state = 1;
                 break;
+            case 'q':
+                return -1;
             case '[':
                 if (state == 1) state = 2;
                 break;
@@ -2294,6 +3126,103 @@ int select_menu(spans options, int selected_index) {
     return selected_index;
 }
 
+/* #escape_handling_issue
+
+After much back-and-forth with GPT-4o and many other online resources, a working program to distinguish escape from arrow keys and other keyboard input.
+However, for now, I'm not going to bother integrating this as I have other higher-priority work.
+This is left here so that when we get to it, we don't have to start from scratch.
+
+#include <stdio.h>
+#include <unistd.h>
+#include <termios.h>
+#include <errno.h>
+#include <stdlib.h>
+
+#define ARROW_UP    1000
+#define ARROW_DOWN  1001
+#define ARROW_RIGHT 1002
+#define ARROW_LEFT  1003
+
+struct termios orig_termios;
+
+void die(const char *s) {
+    perror(s);
+    exit(1);
+}
+
+void disable_raw_mode() {
+    if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &orig_termios) == -1)
+        die("tcsetattr");
+}
+
+void enable_raw_mode() {
+    struct termios raw;
+
+    if (tcgetattr(STDIN_FILENO, &orig_termios) == -1) die("tcgetattr");
+    atexit(disable_raw_mode);
+
+    raw = orig_termios;
+    raw.c_lflag &= ~(ICANON | ECHO); // Disable canonical mode and echo
+    raw.c_cc[VMIN] = 0; // Minimum number of characters for non-canonical read
+    raw.c_cc[VTIME] = 1; // Timeout for non-canonical read (tenths of a second)
+
+    if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw) == -1) die("tcsetattr");
+}
+
+int editor_read_key() {
+    int nread;
+    char c;
+    while ((nread = read(STDIN_FILENO, &c, 1)) != 1) {
+        if (nread == -1 && errno != EAGAIN) die("read");
+    }
+    if (c == '\x1b') {
+        char seq[3];
+        if (read(STDIN_FILENO, &seq[0], 1) != 1) return '\x1b';
+        if (read(STDIN_FILENO, &seq[1], 1) != 1) return '\x1b';
+        if (seq[0] == '[') {
+            switch (seq[1]) {
+                case 'A': return ARROW_UP;
+                case 'B': return ARROW_DOWN;
+                case 'C': return ARROW_RIGHT;
+                case 'D': return ARROW_LEFT;
+            }
+        }
+        return '\x1b';
+    } else {
+        return c;
+    }
+}
+
+int main() {
+    enable_raw_mode();
+
+    while (1) {
+        int c = editor_read_key();
+        switch (c) {
+            case ARROW_UP:
+                printf("Up arrow key\n");
+                break;
+            case ARROW_DOWN:
+                printf("Down arrow key\n");
+                break;
+            case ARROW_RIGHT:
+                printf("Right arrow key\n");
+                break;
+            case ARROW_LEFT:
+                printf("Left arrow key\n");
+                break;
+            case '\033':
+                printf("Escape key\n");
+                exit(0);
+            default:
+                printf("Read character: %c\n", c);
+                break;
+        }
+    }
+
+    return 0;
+}
+*/
 /* #select_model
 
 Here we allow the user to select the model.
@@ -2304,6 +3233,7 @@ The list of models:
 
 - "gpt-3.5-turbo"
 - "gpt-4-turbo"
+- "gpt-4o"
 - "llama.cpp"
 - all ollama models listed in state->ollama_models
 - "clipboard"
@@ -2316,23 +3246,24 @@ We can avoid leaking spans arena memory with the appropriate _push and _pop func
 */
 
 void select_model() {
+    spans models = spans_alloc(7 + state->ollama_models.n);
     spans_arena_push();
-
-    spans models = spans_alloc(5 + state->ollama_models.n);
-    assert(models.n==0);
-    spans_push(&models,S("gpt-3.5-turbo"));
-    spans_push(&models,S("gpt-4-turbo"));
-    spans_push(&models,S("llama.cpp"));
+    models.a[0] = S("gpt-3.5-turbo");
+    models.a[1] = S("gpt-4-turbo");
+    models.a[2] = S("gpt-4o");
+    models.a[3] = S("llama.cpp");
+    models.a[4] = S("clipboard");
     for (int i = 0; i < state->ollama_models.n; i++) {
-        spans_push(&models,state->ollama_models.a[i]);
+        models.a[5 + i] = state->ollama_models.a[i];
     }
-    spans_push(&models,S("clipboard"));
+    models.n = 5 + state->ollama_models.n;
 
-    int current_index = index_of(state->model, models);
-    if (current_index == -1) current_index = 0;
+    int selected_index = index_of(state->model, models);
+    if (selected_index == -1) selected_index = 0;
 
-    int selected_index = select_menu(models, current_index);
-    if (selected_index != current_index) {
+    selected_index = select_menu(models, selected_index);
+
+    if (selected_index >= 0 && selected_index < models.n) {
         state->model = models.a[selected_index];
         save_conf();
     }
@@ -3269,7 +4200,7 @@ Specifically, the difference in length of this block must be added to the .end o
 
 As a sanity check, after this step, we could validate that the .end of the last file is equal to the .end of inp itself.
 
-We need to update the blocks, since any blocks after and including this one may have moved, so we call find_all_blocks().
+We need to update and re-index the blocks, since any blocks after and including this one may have moved, so we call ingest().
 
 Then we call a helper function, new_rev, which takes the filename and the file index for the projfile that was altered.
 This function is responsible for storing a new rev, cleaning up the tmp file, and any reporting to the user that we might do.
@@ -3316,7 +4247,7 @@ void handle_edited_file(char* filename) {
     }
 
     // Updating the blocks representation
-    find_all_blocks();
+    ingest();
 
     // Creating a new revision and cleaning up
     new_rev(S(filename), file_index);
@@ -3528,7 +4459,7 @@ In this case we build a json array and extend it with objects.
 Each one has a role (either user or system) and a content.
 As usual our json_* stuff is wrapped in prt_cmp and prt_pop.
 
-If there is a block that contains "#systemprompt", then we will send that as the first message.
+If there is a block with ID "systemprompt", then we will send that as the first message.
 
 If state->bootstrapprompt is non-empty, we will send that as the first user message, followed by an "OK" reply from the assistant.
 
@@ -3549,7 +4480,8 @@ void send_to_llm(span prompt) {
 
     //prt_cmp();
     json messages = json_a();
-    int system_index = find_block(S("#systemprompt"));
+    //int system_index = find_block(S("#systemprompt"));
+    int system_index = block_by_id(S("systemprompt"));
     if (system_index != -1) {
         json_a_extend(&messages, gpt_message(S("system"), state->blocks.a[system_index]));
     }
@@ -3902,48 +4834,72 @@ int block_by_id(span id) {
 
 In comment_to_prompt, we use the cmp space to construct a prompt around the given block comment.
 
-First we call expand_refs, which expands the block contents with any block references.
+First we call expand_refs_2 twice.
+Once with the "context" mode to get the first "context" markdown code block contents, and once with "body" for the second.
 
-We use out2cmp to redirect the output to cmp space.
+@out2cmp
+
 We create our return span and assign .buf to the cmp.end location.
 
 Next we prt a literal string (such as "```c\n").
-Then we use wrs to write the span passed in as our argument.
+Then we use wrs to write the context block contents.
+We print "```\n\n(above: references)\n----\n(below: current task)\n\n```c\n" to separate context and body.
+We write the expanded body.
 Finally we write "```\n\n" and an instruction.
 
-The above three elements are given in #langtable above as 6., block comment part to prompt pattern.
+The above elements are given in #langtable above as Col. 6.
 
-We can use language_for_block to get the language appropriate to the block (actually the comment part) that is passed in.
+We use language_for_block to get the language appropriate to the block (actually the comment part) that is passed in.
 
-We use out_rst (with the value from out2cmp earlier) to go back to the normal output mode.
+However, sometimes the context block is empty, or contains only whitespace.
+If the trim() of the context block is empty, we use an alternate shorter pattern, which is in #langtable col. 6b.
 
-Then we can get the new end of cmp and make that the end of our return span so that we return everything written into the cmp space.
+We finally get the new end of cmp and make that the end of our return span so that we return everything written into the cmp space.
 */
 
-span comment_to_prompt(span block_comment) {
-    span expanded_comment = expand_refs(block_comment);
-    span lang = language_for_block(block_comment);
-    void* o = out2cmp();
-    span ret = {.buf = cmp.end};
+span comment_to_prompt(span comment) {
+    void* old_out = out2cmp();
+
+    span context = expand_refs_2(comment, S("context"));
+    span body = expand_refs_2(comment, S("body"));
+
+    span ret;
+    ret.buf = cmp.end;
+
+    span lang = language_for_block(comment);
 
     if (span_eq(lang, S("C"))) {
         prt("```c\n");
-        wrs(expanded_comment);
+        if (!empty(trim(context))) {
+            wrs(context);
+            prt("```\n\n(above: references)\n----\n(below: current task)\n\n```c\n");
+        }
+        wrs(body);
         prt("```\n\nWrite the code. Reply only with code. Do not include comments.\n");
     } else if (span_eq(lang, S("Python"))) {
         prt("```python\n");
-        wrs(expanded_comment);
+        if (!empty(trim(context))) {
+            wrs(context);
+            prt("```\n\n(above: reference)\n----\n(below: current work)\n\n```python\n");
+        }
+        wrs(body);
         prt("```\n\nWrite the code. Reply only with code. Avoid code_interpreter.\n");
     } else if (span_eq(lang, S("JavaScript"))) {
         prt("```js\n");
-        wrs(expanded_comment);
+        if (!empty(trim(context))) {
+            wrs(context);
+            prt("```\n\n(above: reference)\n----\n(below: current work)\n\n```js\n");
+        }
+        wrs(body);
         prt("```\n\nWrite the code. Reply only with code. Do not include comments.\n");
     } else if (span_eq(lang, S("Markdown"))) {
-        wrs(expanded_comment);
+        wrs(context);
+        wrs(body);
     }
 
-    out_rst(o);
     ret.end = cmp.end;
+    out_rst(old_out);
+
     return ret;
 }
 
@@ -3954,11 +4910,68 @@ This is mainly for debugging the block references before sending the output to t
 Here we get the current block, get the comment part and call expand_refs on it.
 We clear the display, then display the result to the user with wrs.
 Then we prompt with "Press any key to continue..." and getch() before returning.
-*/
 
 void ex_expandrefs() {
     span current_comment = block_comment_part(state->blocks.a[state->current_index]);
     span expanded = expand_refs(current_comment);
+    clear_display();
+    wrs(expanded);
+    prt("Press any key to continue...");
+    flush();
+    getch();
+}
+
+*/
+/* #press_any_key
+
+@- Pattern used whenever we've printed something the user might otherwise miss.
+We print "Press any key to continue...", flush, and getch.
+*/
+
+/* #ex_toprefs #ex_inrefs
+
+void ex_toprefs();
+void ex_inrefs();
+
+We get look up the current block and get the comment part.
+
+Then we clear the display and call expand_refs_2 with either "context" mode (for toprefs) or "body" mode (for inrefs).
+
+@press_any_key
+*/
+
+void ex_toprefs() {
+    span comment = block_comment_part(state->blocks.a[state->current_index]);
+    clear_display();
+    span expanded = expand_refs_2(comment, S("context"));
+    wrs(expanded);
+    terpri();
+    prt("Press any key to continue...");
+    flush();
+    getch();
+}
+
+void ex_inrefs() {
+    span comment = block_comment_part(state->blocks.a[state->current_index]);
+    clear_display();
+    span expanded = expand_refs_2(comment, S("body"));
+    wrs(expanded);
+    terpri();
+    prt("Press any key to continue...");
+    flush();
+    getch();
+}
+
+/* #ex_expand @ex_expandrefs
+
+void ex_expand();
+
+Ex command handler, similar to the old ex_expandrefs, but now calling expand_refs_2 with the current block, with "both" as the mode.
+*/
+
+void ex_expand() {
+    span current_block = state->blocks.a[state->current_index];
+    span expanded = expand_refs_2(current_block, S("both"));
     clear_display();
     wrs(expanded);
     prt("Press any key to continue...");
@@ -3995,6 +5008,11 @@ When this block is expanded, we would include the content of blocks ref_1 and re
 The top-line blocks should be separated by "\n\n" from each other and the start of the block.
 
 References use @id and blocks are identified by #id, so to follow references we remove the "@", add the "#", and then do a find_block to search for the first block containing that text.
+
+The above is the initial design, implemented by :expandrefs.
+
+However, the new idea can be seen by :refsonly, which is to have a separate message for the references.
+The actual 'r' message itself will then have the top line removed, including the block id.
 */
 /* #expand_refs
 
@@ -4118,6 +5136,337 @@ void expand_refs_rec(span block, int depth) {
     }
 }
 
+/* #out2cmp
+@- Pattern for redirecting output.
+@- Used to allow the convenient functions prt etc to be used when writing to cmp space.
+We use out2cmp to redirect output functions to cmp space, and store the void* which it returns.
+Later after our printing is all done and before returning, we must call out_rst and pass the pointer to it to reset the output to whatever it may have been before.
+@- (not necessarily out, it may have been cmp already, hence the pointer)
+*/
+
+/* #blockref_id #blockref_fname
+
+These two helper functions parse parts out of a block reference.
+
+Block references look like:
+
+"@<id>:<fn>"
+
+Or:
+
+"@<id>"
+
+If the <fn> isn't present, the _fname function returns "comment", which is the default transform fname.
+*/ 
+
+span blockref_id(span ref) {
+    advance(&ref, 1);  // Skip '@'
+    int colon_pos = find_char(ref, ':');
+    if (colon_pos == -1) {
+        return ref;
+    } else {
+        return take_n(colon_pos, &ref);
+    }
+}
+
+span blockref_fname(span ref) {
+    int colon_pos = find_char(ref, ':');
+    if (colon_pos == -1) {
+        return S("comment");
+    } else {
+        advance(&ref, colon_pos + 1);
+        return ref;
+    }
+}
+
+/* #language_comment_starter #language_comment_ender @langtable
+
+In these functions, we are given a language, and based on #langtable, above, Cols. 4 and 5, we return the comment start or end delimiter, respectively, not terminated by a newline.
+*/
+
+span language_comment_starter(span language) {
+    if (span_eq(language, S("C"))) return S("/*");
+    if (span_eq(language, S("Python"))) return S("\"\"\"");
+    if (span_eq(language, S("JavaScript"))) return S("/*");
+    return nullspan();
+}
+
+span language_comment_ender(span language) {
+    if (span_eq(language, S("C"))) return S("*/");
+    if (span_eq(language, S("Python"))) return S("\"\"\"");
+    if (span_eq(language, S("JavaScript"))) return S("*/");
+    return nullspan();
+}
+
+/* #expand_refs_2
+
+span expand_refs_2(span,span);
+
+Here we get a span with references to be expanded, and a mode.
+
+There is a resource-management part of the problem which we handle here, and a recursive part.
+
+We set up span that we will return, pointing .buf to the current cmp.end.
+We call spans_arena_push.
+
+@out2cmp
+
+We call expand_refs_2_rec for the recursive part (which will output the expanded block into cmp space using prt).
+It takes our two args, a 0 for suppressing block delims, and a 0 for recursion depth.
+
+Finally we call spans_arena_pop.
+We update our ret span's .end to the current cmp.end, and return it.
+*/
+
+span expand_refs_2(span refs, span mode) {
+    span ret;
+    ret.buf = cmp.end;
+
+    spans_arena_push();
+    void* old_output = out2cmp();
+
+    expand_refs_2_rec(refs, mode, 0, 0);
+
+    out_rst(old_output);
+    spans_arena_pop();
+
+    ret.end = cmp.end;
+    return ret;
+}
+
+/* #expand_refs_2_rec
+@- TODO: probably this should be two or three functions that are mutually recursive, instead of just one
+
+@- TODO: depth check
+
+void expand_refs_2_rec(span,span,int,int);
+
+A block can have two kinds of references.
+
+The "top refs", in the top line or metadata line, represent background information that the model (or programmer) may need to have.
+
+It may be better to present this to the model as a separate message.
+
+So here we take, in addition to the span, three arguments:
+
+- whether to expand the top line only ("context"), the block body only ("body"), or "both".
+- whether we are in a comment-delimiter-stripping context (0 or 1).
+- a recursion depth (the number of recursive calls above us, i.e. 0 on the first call).
+
+If we are in the "both" mode, we first recurse with "context", then with "body".
+In both cases we pass the comment-delimiter-stripping context down if it is set.
+
+We look up the block language with language_for_block.
+We use this to get the block comment delimiters, and put these in variables for later use.
+
+If we are in the context mode, then we handle only the top line.
+First we get the top line with next_line, and tokenize with split_whitespace.
+
+Then we iterate over the tokens.
+If the token starts with '#' it is the block id and, we skip it.
+
+If it starts with '@', then it is a block reference and we will process it as described below.
+
+If it doesn't start with either of those things, we simply ignore it and continue.
+
+To process a block reference in "top-line" or "context" mode:
+
+- we get the id out of it, and the transform fname
+- we call chase_ref_2 to get the block contents, if any, or the null span if not found
+
+If the block content is not found then we print the failing block reference as-is on a line, with a blank line below it.
+
+Now we handle the transform name.
+
+If it is "comment", then we get the comment part of the block and recurse on that.
+Specifically, we call ourselves with
+- the comment part,
+- the null span, indicating the "both" expansion mode, and
+- the comment-delimiter-stripping context remaining the same.
+After the recursive call, we print a blank line with terpri.
+
+If it is "code", then we get the code part of the block and print it using wrs, also followed by a blank line.
+
+If it is "all", then we first recurse on the comment part, exactly as described above, and then we print the code part.
+(Including the blank line following each of them.)
+
+This is the end of our handling of the top-line tokens, which is also the end of our handling of context mode.
+
+Now we describe the "body" mode.
+
+We remove the top line to process it separately.
+We tokenize it as before and iterate over the tokens, finding the first one that starts with '#', if any, which is the block id.
+@- TODO: we should allow multiple block ids since we're already using this pattern in a few places profitably
+@- probabli: We [...] and build up a set of block ids using concat.
+@- er, actually, we can just print the delimiter first and the parse the top line, printing all the block ids we find
+@- tried this manually
+
+If the comment-delimiter-stripping argument is 0, and there was a block id, we print the comment delimiter, a space, the block id (which has the '#' already included), and two newlines.
+If there was no block id, we just print the comment delimiter and two newlines.
+
+If the comment-delimiter-stripping argument is set, we do none of this.
+
+Now we iterate over the remaining lines of the body, handling each:
+
+If the line starts with "@- ", it is a comment line and we simply skip it.
+If the line starts with '@', then we process it as described below.
+Otherwise, we find out if the line is the last one, by checking if the trim() of the span that we are consuming next lines from is already empty, and if so we handle it specially as described below.
+Otherwise, we simply print the line as-is, followed by a newline (as next_line will have stripped the original newline off).
+
+To process a block reference in "body" mode:
+
+- as before, we get the id and transform fname out of it
+- we call chase_ref_2 to get the contents or null span
+
+Again if the block reference is not found we print the failing reference followed by newline (but without a blank line following it in this context; in the comment body the user can include newlines directly where desired).
+
+Now again we handle the transform name.
+If it's "comment", we recurse exactly as above, but we don't add the blank line after.
+If it's "code", we print the code part, and also don't add a blank line after.
+If it's "all", we recurse on the comment part, then we do add the blank line, then we print the code, without a blank line.
+
+To process the last body line:
+If the comment-delimiter-stripping argument is 1, we use ends_with, shorten, and the block comment ender that we stored above to strip the block comment ender from the end of the last line, if one is found, if not just leave it as-is.
+Then we print the last line just like it was any other body line, followed by a newline as usual.
+
+@- After handling all the body lines, if the comment-delimiter-stripping argument is 0, we print the closing delimiter on a line by itself.
+*/
+
+void expand_refs_2_rec(span block, span mode, int comment_context, int depth) {
+    if (depth > 512) { prt("block expansion depth limit (512) exceeded, possible reference cycle?\n"); flush(); exit(1); } // late manual addition
+
+    span language = language_for_block(block);
+    span comment_start = language_comment_starter(language);
+    span comment_end = language_comment_ender(language);
+
+    if (span_eq(mode, S("both"))) {
+        expand_refs_2_rec(block, S("context"), comment_context, depth);
+        expand_refs_2_rec(block, S("body"), comment_context, depth);
+        return;
+    }
+
+    if (span_eq(mode, S("context"))) {
+        span top_line = next_line(&block);
+        spans tokens = split_whitespace(top_line);
+
+        for (int i = 0; i < tokens.n; ++i) {
+            span token = tokens.a[i];
+
+            if (token.buf[0] == '#') continue;
+
+            if (token.buf[0] == '@') {
+                span ref_id = blockref_id(token);
+                span transform = blockref_fname(token);
+                span ref_content = chase_ref_2(ref_id);
+
+                if (empty(ref_content)) {
+                    prt("%.*s\n\n", len(token), token.buf);
+                    continue;
+                }
+
+                if (span_eq(transform, S("comment"))) {
+                    span comment = block_comment_part(ref_content);
+                    //expand_refs_2_rec(comment, S("both"), 1, depth + 1);
+                    expand_refs_2_rec(comment, S("both"), comment_context, depth + 1);
+                    terpri();
+                } else if (span_eq(transform, S("code"))) {
+                    span code = block_code_part(ref_content);
+                    wrs(code);
+                    terpri();
+                } else if (span_eq(transform, S("all"))) {
+                    span comment = block_comment_part(ref_content);
+                    //expand_refs_2_rec(comment, S("both"), 1, depth + 1);
+                    expand_refs_2_rec(comment, S("both"), comment_context, depth + 1);
+                    terpri();
+                    span code = block_code_part(ref_content);
+                    wrs(code);
+                    terpri();
+                }
+            }
+        }
+        return;
+    }
+
+    if (span_eq(mode, S("body"))) {
+        span top_line = next_line(&block);
+        spans tokens = split_whitespace(top_line);
+
+        // manual:
+        if (!comment_context) {
+          wrs(comment_start);
+          sp();
+        //}
+
+          // I guess we actually only want to print the id when we're not in a comment already, i.e. not when inline-expanding
+          for (int i = 0; i < tokens.n; ++i) {
+              if (tokens.a[i].buf[0] == '#') {
+                  wrs(tokens.a[i]);
+                  sp();
+              }
+          }
+          bksp(); // lose the extra space
+          terpri();
+
+        }
+
+        /*
+        span block_id = nullspan();
+        for (int i = 0; i < tokens.n; ++i) {
+            if (tokens.a[i].buf[0] == '#') {
+                block_id = tokens.a[i];
+                break;
+            }
+        }
+
+        if (!comment_context && !empty(block_id)) {
+            wrs(comment_start);
+            sp();
+            wrs(block_id);
+            terpri();
+            terpri();
+        }
+        */
+
+        while (!empty(block)) {
+            span line = next_line(&block);
+            if (starts_with(line, S("@- "))) continue;
+
+            if (line.buf[0] == '@') {
+                span ref_id = blockref_id(line);
+                span transform = blockref_fname(line);
+                span ref_content = chase_ref_2(ref_id);
+
+                if (empty(ref_content)) {
+                    prt("%.*s\n", len(line), line.buf);
+                    continue;
+                }
+
+                if (span_eq(transform, S("comment"))) {
+                    span comment = block_comment_part(ref_content);
+                    expand_refs_2_rec(comment, S("both"), 1, depth + 1);
+                } else if (span_eq(transform, S("code"))) {
+                    span code = block_code_part(ref_content);
+                    wrs(code);
+                } else if (span_eq(transform, S("all"))) {
+                    span comment = block_comment_part(ref_content);
+                    expand_refs_2_rec(comment, S("both"), 1, depth + 1);
+                    terpri();
+                    span code = block_code_part(ref_content);
+                    wrs(code);
+                }
+            } else {
+                if (empty(trim(block))) {
+                    if (comment_context && ends_with(line, comment_end)) {
+                        shorten(&line, len(comment_end));
+                    }
+                }
+                wrs(line);
+                terpri();
+            }
+        }
+    }
+}
+
 /* #chase_ref @sio
 
 Here we get a reference like "@id" where "id" is any block identifier.
@@ -4149,6 +5498,55 @@ span chase_ref(span ref) {
     return block_transforms(block, mod);
 }
 
+/* #chase_ref_2 @sio
+
+span chase_ref_2(span);
+
+Here we get bare block id (i.e. without the "@" or anything else), and return the block comments.
+
+We use block_by_id to get the block, and if there is no match, we return the null span.
+Otherwise we return the block (from state).
+*/
+
+span chase_ref_2(span ref_id) {
+    int idx = block_by_id(ref_id);
+    if (idx == -1) {
+        return nullspan();
+    }
+    return state->blocks.a[idx];
+}
+
+/* old chase_ref_2 @sio
+
+Here we get a reference like "@id" where "id" is any block identifier.
+The reference may also have a modifier, which is a ":" followed by a function name, like "@id:all".
+
+We check that the "@" is present (and return the null span if not) but otherwise we won't need it so we move past it.
+We check if the ":" is present, and if it is, we take the part before it as the id.
+Otherwise the id is everything (after the "@" which we've already handled).
+
+We use block_by_id to get the block, and if there is no match, we return the null span.
+Otherwise we return the block (from state).
+
+span chase_ref_2(span ref) {
+    if (empty(ref) || *ref.buf != '@') return nullspan();
+    advance1(&ref);
+
+    span id = ref;
+    int colon_pos = find_char(ref, ':');
+    if (colon_pos != -1) {
+        id = take_n(colon_pos, &ref);
+    }
+
+    int block_idx = block_by_id(id);
+    if (block_idx == -1) return nullspan();
+
+    span block = state->blocks.a[block_idx];
+    
+    return block;
+}
+
+*/
 /* #strip_markdown_codeblock
 
 We are given a span and we find the code inside a code block, if there is one.
@@ -4347,7 +5745,7 @@ Then we simply copy any newlines and the new code into inp.
 
 We then must update the .end of the current file contents, and both the .buf and .end of all subsequent projfiles, since the block length may have changed and therefore the file contents lengths will have also changed.
 
-As before we then find the current locations of the blocks.
+As before we then find the current locations of the blocks and handle all downstream tasks with ingest().
 
 Once all this is done, we call new_rev, passing a null span for the filename, since there's no filename here.
 */
@@ -4396,7 +5794,7 @@ void replace_block_code_part(span new_code) {
     }
 
     // Re-find all the blocks since inp has changed
-    find_all_blocks();
+    ingest();
 
     // Store a new revision, no filename required
     new_rev(nullspan(), file_index);
