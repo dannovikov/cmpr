@@ -131,9 +131,8 @@
     ✓ add block_transforms(b,f)
   ✓ add :expand, :toprefs, :inrefs
   ✓ add "#" feature
-
-
-
+  ✓ turn off bootstrap on startup
+  ✓ make .n start at 0
 
 
 
@@ -141,29 +140,32 @@
 WHAT WE ARE CURRENTLY DOING:
   → basic diff features
     → add "U" with a listing, most-recent first
-      → checksum and index blocks
+      ✓ checksum and index blocks
         ✓ design how it will work
         ✓ implement checksums for blocks, lines, files (in #checksum_code)
         ✓ implement checksums for each rev
-      → implement rev-chron linear search
-      → implement "find previous version of block"
+      ✓ implement "find previous version of block"
+        support j/k, q, Enter
+        render timestamps
+        optimization (caching?)
+        deal with non-adjacent duplication
 
         global context block
+    update ? short help
 
     "Error: Block does not belong to any file." happened
       context: added a space before a "#" in the last markdown block in the last file, then :wq
     Arena overflow for spans
+    chmod issue on Windows (exec bit)
     actually index block ids
     make "#" jump to block by id (or maybe a menu!)
     make "@" be a menu of references from this block
     "@@" or sth is menu of blocks that refer to us
     automatically suggest regen of stale downstream blocks
     prt_exit() is probably actually a good idea
-    turn off bootstrap on startup
     explore "prompt palette" idea
     fix the first-line thing on @id:code
     replace spans arena with generic implementation
-  ✓ make .n start at 0
     keep ollama model loaded
     make LLM calls asynchronous
     clipboard model set automatically
