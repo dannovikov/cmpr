@@ -4522,7 +4522,7 @@ void finalize_search() {
     }
 }
 
-/* #search_forward, #search_backward
+/* #search_forward #search_backward
 
 In these two functions (used by n/N) we first get the sequence of blocks which match state.previous_search.
 If this is empty, we do nothing.
@@ -4995,8 +4995,11 @@ void edit_current_block() {
     span block = state->blocks.a[state->current_index];
     char* filename = s(tmp_filename());
     write_to_file_span(block, S(filename), 0);
+    prt("Temp file written %s for editing.\n", filename);
+    flush();
     int editor_status = launch_editor(filename);
     if (editor_status == 0) {
+        prt("Editor exited successfully, creating rev.\n"); flush();
         handle_edited_file(filename);
     } else {
         prt("Editor exited with error, changes not saved.\n");
@@ -5229,6 +5232,7 @@ void new_rev(span tmp_filename, int file_index) {
     strftime(timestamp, sizeof(timestamp), "%Y%m%d-%H%M%S", timeinfo);
     
     span rev_path = concat(concat(dir, S("/revs/")), S(timestamp));
+    prt("writing new rev %.*s\n", len(rev_path), rev_path.buf);
     write_to_file_span(state->files.a[file_index].contents, rev_path, 1);
     
     update_projfile(file_index, tmp_filename, rev_path);

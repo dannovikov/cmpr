@@ -157,13 +157,14 @@ WHAT WE ARE CURRENTLY DOING:
     Another more specific answer is as follows: we structure the problem in such a way that there is either a solution or there is no side effect.
     This is the principle of least privilege and it means you can delegate authority, for example, to a postscript program and trust that it will not access the network.
 
-    update ? short help
-    merge 2 PRs
+  ✓ update ? short help
+  ✓ merge 2 PRs
+  ✓ bugfix :inrefs, :toprefs crashes
+  ✓ chmod issue on Windows (exec bit)
+  ✓ bump version and push v8
+
     dedup transitive block references
     Arena overflow for spans
-    chmod issue on Windows (exec bit)
-    bump version and push v8
-
     I think flush should probably never apply to cmp, only out
     rename bootstrap to global context block
     "Error: Block does not belong to any file." happened
