@@ -22,3 +22,6 @@ fdecls.h: cmpr.c
 
 clean:
 	rm -rf dist
+
+install: dist/cmpr
+	install -m 755 dist/cmpr /usr/local/bin/cmpr
