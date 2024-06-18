@@ -59,5 +59,5 @@ I will provide you with descriptions of code. Use existing functions, library co
 
 Don't redefine functions that already exist, just use them.
 
-Reply with only with OK.
+Reply only with OK.
 EOF

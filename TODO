@@ -141,27 +141,23 @@
   ✓ fix the first-line thing on @id:code
   ✓ replace spans arena with generic implementation
   ✓ make "#" jump to block by id (as a menu)
+  ✓ dataloss pass: think through everything; addresses control issue
+    ✓ visibility into what's happening with process control; be chatty around tmp files
+    ✓ user visibility into what's in the files and when it got there
+    ✓ "diffs and dates"
+  ✓ update ? short help
+  ✓ merge 2 PRs
+  ✓ bugfix :inrefs, :toprefs crashes
+  ✓ chmod issue on Windows (exec bit)
 
 
 
 
 WHAT WE ARE CURRENTLY DOING:
+  → bump version and push v8
 
 
-  → dataloss pass: think through everything; addresses control issue
-    → visibility into what's happening with process control; be chatty around tmp files
-    = user visibility into what's in the files and when it got there
-    = "diffs and dates"
-    Q: if GPT writes the code, how can we trust it?
-    A? -- we have invariants that are upheld mainly by large-scale structure
-    Another more specific answer is as follows: we structure the problem in such a way that there is either a solution or there is no side effect.
-    This is the principle of least privilege and it means you can delegate authority, for example, to a postscript program and trust that it will not access the network.
 
-  ✓ update ? short help
-  ✓ merge 2 PRs
-  ✓ bugfix :inrefs, :toprefs crashes
-  ✓ chmod issue on Windows (exec bit)
-  ✓ bump version and push v8
 
     dedup transitive block references
     Arena overflow for spans

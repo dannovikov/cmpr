@@ -1,4 +1,4 @@
-#v8
+# v8
 
 ### Block references
 
@@ -23,3 +23,40 @@ Markdown is now supported; each heading creates a block.
 (If you have two headings, like "# big heading\n## sub-heading" then you'll get two blocks.)
 The markdown blocks don't have any "code part", they are all NL and no PL, so most of the LLM features like "r" won't make sense to use with them.
 It's just a quick way to move through markdown files and keep your code organized.
+
+### Windows and build fixes
+
+Thanks to @dannovikov for the Windows improvements.
+
+### Ollama support
+
+Run the ollama server locally and load the models, and add the models you want to use to the conf file (e.g. "ollamas: llama3,llama3:70b").
+The models will then appear in ":models".
+
+### Llama.cpp support
+
+Just run llama.cpp with the model you want to use, and use ":models" to pick llama.cpp.
+
+### Curl binary instead of curllib
+
+We no longer link against libcurl, but just call out to the curl binary.
+You can set the curlbin in the conf file if you don't want the default (which is just "curl" in your PATH).
+
+### bootstrap-py.sh
+
+Thanks to @petterik for the Python bootstrap script.
+To use it, copy bootstrap-py.sh into your project, put "bootstrap: ./bootstrap-py.sh" in your .cmpr/conf and modify it to suit your needs.
+The script assumes you have a top-level comment in block 1 that is relevant for the LLM and that you have ctags installed.
+
+# v7
+
+### API support
+
+Support for LLM rewriting directly via API is now supported in addition to the clipboard style interaction.
+Use ":models" to switch between the modes, and put your OpenAI API key in .cmpr/openai-key.
+
+# v6 ... v1
+
+### bootstrap, --init, and conf file handling
+
+Many minor improvements and fixes.

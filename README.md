@@ -163,7 +163,7 @@ The references will then be expanded by cmpr before sending the NL code to the L
 
 Developed on Linux; works on Mac or Windows with WSL2.
 
-It's early days and there <s>may be</s><ins>are</ins> bugs!
+It's early days and there <s>may be</s> <ins>are</ins> bugs!
 
 There's support for a "bootstrap" script with the ":bootstrap" ex command.
 You make a script that produces your bootstrap block on stdout, you put it in the conf file as "bootstrap: ./your-script.sh", and you use :bootstrap to run it.
