@@ -65,7 +65,12 @@ As of v8 you can also use OpenAI's GPT models via API and we support local model
 
 Cmpr is best for programmers who are comfortable working in vim or another terminal-based editor, as this is how the workflow is organized.
 
-You'll be switching to a new way of programming, so it's easier to adopt on new projects, rather than working on an existing codebase.
+It's a new way of programming, so it's easier to adopt on new projects.
+Adapting an existing codebase is harder, just like integrating Rust with a C++ codebase is harder than using Rust for a new project.
+
+You can use another IDE or editor alongside cmpr if you like, but it works better if you adopt it as your primary interface.
+You use cmpr to navigate and search and manage your blocks, edit them in an editor, and get the LLM to rewrite the code parts of each block.
+The tool also manages revisions, saving a copy every time either you or the LLM edits the codebase.
 
 ## Cmpr vs Others
 
@@ -88,19 +93,20 @@ Let us know!
 
 ## Blocks
 
-All C code here is by GPT4, and all the English is by the human authors, which captures a key idea:
+All the C code here is by GPT4 (or another LLM), and all the English is by the human authors, which captures a key idea:
 
 - Code is organized into blocks; each has a comment and then (usually) some code.
 - You write the comment; the LLM writes the code.
 - You iterate on the comment until the code works and meets your standard.
 
 The cmpr tool itself runs on your machine and supports this workflow.
-You use cmpr to navigate and search and manage your blocks, edit them in an editor, and get the LLM to rewrite the code parts of each block.
-The tool also manages revisions, saving a copy every time or the LLM edit the codebase.
-You can use another IDE or editor alongside cmpr if you like, but it works better if you adopt it as your primary interface, replacing the IDE or editor you use now.
-(I still dip back into vim frequently; there's a lot of features we still lack.)
 
-There are many more features being planned related to blocks, diffs, and bidirectional NL <-> PL correspondence.
+## Block references
+
+As of v8 you can use this feature (the [Release Notes](release-notes.md) has more).
+It's a powerful way to simplify your NL code, as it lets you define concepts in one place and then refer to them by inclusion in multiple places.
+The references will then be expanded by cmpr before sending the NL code to the LLM (or clipboard).
+The best way to try it out is look at some example code (like the cmpr source) or ask about it in the discord.
 
 ## Why blocks?
 
@@ -145,15 +151,6 @@ You can use them to troubleshoot API issues, or as a dataset for statistics or f
 With the "clipboard" model, you will want to run ":bootstrap", and then paste the output into the LLM chat window.
 If you're using the LLM via API, this will be done for you, but you still need to run ":bootstrap" manually before using "r".
 
-## Block references feature
-
-There's no documentation for this feature yet, but as of v8 you can use it.
-
-The best way to try it out is look at some example code (like the cmpr source) or ask about it in the discord.
-
-It's a powerful way to simplify your NL code, as it lets you define concepts in one place and then refer to them by inclusion in multiple places.
-
-The references will then be expanded by cmpr before sending the NL code to the LLM (or clipboard).
 ### Bonus: cmpr in cmpr
 
 1. We ship our own cmpr conf file, so run cmpr in the cmpr repo to see the code the way we do while building it.
