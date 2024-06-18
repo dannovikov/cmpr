@@ -2,21 +2,15 @@
 
 ## Program in English!
 
-Have you ever wanted to write your code in English and have an LLM compile it into a programming language like C or Python?
-No?
-Well, now you can.
+Cmpr is a tool for programming in natural language.
 
-The programming language code is treated as generated code, which we do not edit directly.
+Code is written in NL, such as English, and translated or compiled by the LLM into a programming language, like Python or C.
 
-We're still programming, but now in English!
+The PL code is treated as generated code, while we work on the NL level.
 
-Programming in English has a learning curve, like any new programming language, but also some benefits.
-The greatest difficulty in programming and debugging, especially in someone else's code, is understanding what is going on.
-Reading a program in English makes this much easier.
+Programming in English has a learning curve, like any new programming language.
 
-Code comments are famous for being out of date or simply incorrect, but when the code is generated from the comments, you know that's not the case.
-You can also still read the implementation, of course, when necessary.
-You might call this "DDD" for documentation-driven development: write the docs and get the code for free.
+You might also call this "DDD" for documentation-driven development: write the docs (or detailed spec) and get the code for free.
 
 The difficulties are:
 
@@ -54,18 +48,24 @@ Compare the English code with [the generated HTML, CSS, and JS](doc/examples/204
 Which one would you rather read?
 
 A more complex example is [the cmpr code itself](https://github.com/inimino/cmpr/cmpr.c).
-In constrast with 2048, this is not something the model was trained on, it's written in C, it's using a custom library which is also not in the training set, so the LLM must be told about it, and it's a moderately complex program, not a toy.
-This proves that GPT4 is capable of writing real-world production-ready code in a challenging environment.
+In constrast with 2048, this is not something the model was trained on, it's written in C, it's using an I/O library which is also not in the training set, so the LLM must be told about it, and it's a moderately complex program, not a toy.
+This proves that modern LLMs is capable of writing real-world production-ready code in a challenging environment.
 
 ## What's this then?
 
-This is a prototype of workflow tooling for programming in English.
+This is a prototype of workflow tooling for programming in natural language.
 
 If you have access to GPT4, it generally writes the best code.
 The "clipboard model" just puts prompts onto the system clipboard, and you can copy and paste them into a chat window with ChatGPT or any other model with a web interface.
 This is the recommended way of starting out, because it makes everything that is going on very visible!
 
-As of v8 you can also use OpenAI's GPT models and we support local models via llama.cpp and ollama, see quick start section below for details.
+As of v8 you can also use OpenAI's GPT models via API and we support local models via llama.cpp and ollama; see quick start section below for details.
+
+## Who is this for?
+
+Cmpr is best for programmers who are comfortable working in vim or another terminal-based editor, as this is how the workflow is organized.
+
+You'll be switching to a new way of programming, so it's easier to adopt on new projects, rather than working on an existing codebase.
 
 ## Cmpr vs Others
 
@@ -78,7 +78,7 @@ All the code in cmpr is actually written by GPT4 using the tool; I do not believ
 Programming requires AGI-level problem solving skills that LLMs do not have.
 
 The Devin-style approach aims to replace programmers with AI, and the user of the AI is essentially a project manager.
-We believe this is completely unrealistic given the current state of AI.
+We believe this is unrealistic given the current state of AI.
 (If anything, we'll be able to replace the project manager role with AI before we can do the same for the programmer role.)
 A better analogy is that we elevate the programmer to an architect with an AI assistant that can handle low-level details.
 This might suggest that fewer programmers will be needed, but Jevon's paradox suggests demand may increase, as software development becomes more productive.
@@ -114,11 +114,11 @@ So the block size is determined by the amount of code that the LLM can write "in
 
 ## Quick start:
 
-0. Recommended: look at some of the sample code above or watch the 2048 demo video to see if the idea appeals to you, and experiment with bare ChatGPT program generation first if you haven't already.
-1. Get the code and build; assuming git repo at ~/cmpr and you have gcc, `cd cmpr; make` should do. Put the executable in your path with e.g. `sudo install cmpr/dist/cmpr /usr/local/bin`.
+0. Recommended: look at some of the sample code above or watch the 2048 demo video to see if the idea appeals to you; consider experimenting with bare ChatGPT program generation first if you haven't already.
+1. Get the code and build; assuming git repo at ~/cmpr and you have gcc, `cd cmpr && make && sudo make install` should do.
 2. Go to (or create) the directory for your project and run `cmpr --init`, this creates a `.cmpr/` directory (like git) with a conf file and some other stuff.
-3. `export EDITOR=emacs` or whatever editor you use, otherwise just `vi` will be run by default.
-4. Run `cmpr` in your project directory, and it will ask you some configuration questions.
+3. `export EDITOR=emacs` or whatever editor you want to use, otherwise just `vi` will be run by default.
+4. Run `cmpr --init` in your project directory, then `cmpr` and it will ask you some configuration questions.
    If you want to change the answers later, you can edit the .cmpr/conf file.
 5. Right now things are rough and changing all the time, so stop by discord and ask if you hit any roadblocks!
 
@@ -142,6 +142,18 @@ When you run ":models" now you'll see your Ollama models added to the list and y
 With any of these models used via API, we will record all API calls in `.cmpr/api_calls`.
 You can use them to troubleshoot API issues, or as a dataset for statistics or finetuning your own model, etc.
 
+With the "clipboard" model, you will want to run ":bootstrap", and then paste the output into the LLM chat window.
+If you're using the LLM via API, this will be done for you, but you still need to run ":bootstrap" manually before using "r".
+
+## Block references feature
+
+There's no documentation for this feature yet, but as of v8 you can use it.
+
+The best way to try it out is look at some example code (like the cmpr source) or ask about it in the discord.
+
+It's a powerful way to simplify your NL code, as it lets you define concepts in one place and then refer to them by inclusion in multiple places.
+
+The references will then be expanded by cmpr before sending the NL code to the LLM (or clipboard).
 ### Bonus: cmpr in cmpr
 
 1. We ship our own cmpr conf file, so run cmpr in the cmpr repo to see the code the way we do while building it.
@@ -151,17 +163,18 @@ You can use them to troubleshoot API issues, or as a dataset for statistics or f
 
 Developed on Linux; works on Mac or Windows with WSL2.
 
-It's early days and there may be bugs!
+It's early days and there <s>may be</s><ins>are</ins> bugs!
 
-There's preliminary support for a "bootstrap" script with the ":bootstrap" ex command.
-You make a script that produces your bootstrap block on stdout, you put it in the conf file, and you use :bootstrap to run it.
+There's support for a "bootstrap" script with the ":bootstrap" ex command.
+You make a script that produces your bootstrap block on stdout, you put it in the conf file as "bootstrap: ./your-script.sh", and you use :bootstrap to run it.
+(It can actually be any command that produces output on stdout, it doesn't have to be a shell script.)
 For more details on this feature, stop by the discord and ask!
 We also ship our own bootstrap.sh which you can look at as a template.
+There is also a version that's adapted for Python code.
 
 When you use an API (instead of clipboard mode) there is also a system prompt sent to the model on every request.
 This comes from a block with the id "systemprompt".
-You can look in the repo to see by example how we do this.
-We have a file (also called systemprompt), this file is listed in our conf file, and there's a block in that file that has the system prompt we use.
+For example, for cmpr itself, we have a file (also called systemprompt), this file is listed in our conf file, and there's a block in that file that has the system prompt we use.
 If you're using ChatGPT or another model, putting similar instructions in the settings (ChatGPT calls them "custom instructions") will give good results.
 Otherwise the models tend to try to be helpful, when what you want in this workflow is for it to follow instructions and write code.
 
@@ -170,8 +183,6 @@ For Mac you would use "pbcopy" and "pbpaste", on Linux we are using "xclip".
 
 We support a small number of languages at the moment (this is mostly about how files get broken into blocks).
 It's not hard to extend the support to other languages, just ask for what you want in the discord and it may happen soon!
-
-To track progress, check out the TODO file in the repo.
 
 ## More
 
