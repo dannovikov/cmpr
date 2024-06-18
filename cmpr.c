@@ -4914,7 +4914,7 @@ void check_conf_vars() {
 
     if (state->files.n == 0) {
         while (1) {
-            prt("Enter at least one project file (e.g. main.c or main.py or index.js) where your blocks will be stored:\n");
+            prt("\nEnter at least one project file (e.g. main.c or main.py or index.js) where your blocks will be stored:\n");
             flush();
             span input = read_line(&cmpComplement, nullspan());
             cmp.end = input.end;
@@ -4927,7 +4927,7 @@ void check_conf_vars() {
 
     for (int i = 0; i < state->files.n; i++) {
         if (empty(state->files.a[i].language)) {
-            prt("Please specify a language for %.*s, one of C, Python, JavaScript:\n", len(state->files.a[i].path), state->files.a[i].path.buf);
+            prt("\nPlease specify a language for %.*s, one of C, Python, JavaScript (case sensitive):\n", len(state->files.a[i].path), state->files.a[i].path.buf);
             flush();
             span input = read_line(&cmpComplement, nullspan());
             cmp.end = input.end;
@@ -6516,7 +6516,7 @@ In send_to_clipboard, we are given a span and we must send it to the clipboard u
 
 There is a global ui_state* variable "state" with a span cbcopy on it.
 
-Before we do anything else we ensure this is set by calling ensure_conf_var with the message "The command to pipe data to the clipboard on your system. For Mac try \"pbcopy\", Linux \"xclip -i -selection clipboard\", Windows please let me know and I'll add something here".
+Before we do anything else we ensure this is set by calling ensure_conf_var with the message "The command to pipe data to the clipboard on your system. For Mac try \"pbcopy\", Linux \"xclip -i -selection clipboard\", Windows \"clip.exe\"".
 
 We run this as a command and pass the span data to its stdin.
 We use the `s_buffer()` library method and heap buffer pattern to get a null-terminated string for popen from our span conf var.
@@ -6525,7 +6525,7 @@ We complain and exit if anything goes wrong as per usual.
 */
 
 void send_to_clipboard(span content) {
-    ensure_conf_var(&(state->cbcopy), S("The command to pipe data to the clipboard on your system. For Mac try \"pbcopy\", Linux \"xclip -i -selection clipboard\", Windows please let me know and I'll add something here"), S(""));
+    ensure_conf_var(&(state->cbcopy), S("The command to pipe data to the clipboard on your system. For Mac try \"pbcopy\", Linux \"xclip -i -selection clipboard\", \"clip.exe\""), S(""));
 
     char command[2048];
     snprintf(command, sizeof(command), "%.*s", (int)(state->cbcopy.end - state->cbcopy.buf), state->cbcopy.buf);
