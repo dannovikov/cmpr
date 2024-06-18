@@ -19,10 +19,9 @@ In addition to the block references feature using them, they are also used by th
 
 ### Markdown support
 
-Markdown is now supported; each heading creates a block.
-(If you have two headings, like "# big heading\n## sub-heading" then you'll get two blocks.)
-The markdown blocks don't have any "code part", they are all NL and no PL, so most of the LLM features like "r" won't make sense to use with them.
-It's just a quick way to move through markdown files and keep your code organized.
+Markdown is now supported.
+Each heading creates a block: if you have "# h1\n## h2" you'll get two blocks.
+Markdown blocks don't have a "code part", they are all NL and no PL.
 
 ### Windows and build fixes
 
