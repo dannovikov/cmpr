@@ -619,7 +619,8 @@ void call_llm(span model, json messages, void (*cb)(span)) {
 
 In this function, we check that the file ~/.cmpr/openai-key exists and has the correct permissions.
 
-Specifically, it should have read permissions only for the owner, which must be the current user.
+@- Specifically, it should not have read permissions for any other user.
+@- How much do we care about this?
 
 We use null-terminated strings and standard C library functions for all of this.
 
@@ -639,7 +640,8 @@ void read_openai_key() {
     const char* key_path = ".cmpr/openai-key";
     struct stat st;
 
-    if (stat(key_path, &st) == -1 || st.st_mode != (S_IRUSR | S_IFREG) || st.st_uid != getuid()) {
+    //if (stat(key_path, &st) == -1 || st.st_mode != (S_IRUSR | S_IFREG) || st.st_uid != getuid()) {
+    if (stat(key_path, &st) == -1) {
         return;
     }
 
@@ -3696,6 +3698,7 @@ void keyboard_help() {
     prt("B    - Build project with provided command\n");
     //prt("v    - Toggle visual selection mode\n");
     prt("/    - Enter search mode\n");
+    prt("#    - Open block id jump list\n");
     prt(":    - Enter ex command line\n");
     prt("n    - Repeat search forward\n");
     prt("N    - Repeat search backward\n");
@@ -3890,10 +3893,10 @@ void handle_ex_command() {
         select_model();
     } else if (span_eq(state->ex_command, S(":expand"))) {
         ex_expand();
-    } else if (span_eq(state->ex_command, S(":toprefs"))) {
-        ex_toprefs();
-    } else if (span_eq(state->ex_command, S(":inrefs"))) {
-        ex_inrefs();
+    //} else if (span_eq(state->ex_command, S(":toprefs"))) {
+    //    ex_toprefs();
+    //} else if (span_eq(state->ex_command, S(":inrefs"))) {
+    //    ex_inrefs();
     }
     state->ex_command = nullspan();
 }
@@ -3919,8 +3922,8 @@ void ex_help() {
     prt(":help - Print short help on available ex commands.\n");
     prt(":model - Select the LLM to use for \"r\" and other commands.\n");
     prt(":expand - Expands block references and displays the expanded result.\n");
-    prt(":toprefs - Expands and displays the top-line block references in a single markdown code block.\n");
-    prt(":inrefs - Expands and displays this block with inline block references expanded.\n");
+    //prt(":toprefs - Expands and displays the top-line block references in a single markdown code block.\n");
+    //prt(":inrefs - Expands and displays this block with inline block references expanded.\n");
     flush();
     prt("Press any key to continue...");
     flush();

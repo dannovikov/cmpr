@@ -18,5 +18,6 @@ language: Markdown
 file: systemprompt
 file: DATALOSS.md
 file: README.md
+file: release-notes.md
 file: doc/FE.md
 file: doc/plans.txt
