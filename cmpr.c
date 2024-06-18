@@ -1,5 +1,8 @@
 /* #test_block
+
 Here we have a function int add(int, int).
+
+@- This is a comment line (hidden from the LLM).
 */
 
 int add(int a, int b) {
@@ -86,9 +89,9 @@ Markdown: There is no comment part, markdown blocks are often all prose.
 
 6. Default block comment to prompt pattern:
 
-C: "```c\n" $CONTEXT$ "```\n\n(above: references)\n----\n(below: current task)\n\n```c\n" $BODY$ "```\n\nWrite the code. Reply only with code. Do not include comments.\n"
-Python: "```python\n" $CONTEXT$ "```\n\n(above: reference)\n----\n(below: current work)\n\n```python\n" $BODY$ "```\n\nWrite the code. Reply only with code. Avoid code_interpreter.\n"
-JavaScript: "```js\n" $CONTEXT$ "```\n\n(above: reference)\n----\n(below: current work)\n\n```js\n" $BODY$ "```\n\nWrite the code. Reply only with code. Do not include comments.\n"
+C: "```c\n" $CONTEXT$ "```\n\n(above: references)\n----\n(below: current task)\n\n```c\n" $BODY$ "```\n\nWrite the code only for the current task. Reply only with code. Do not include comments.\n"
+Python: "```python\n" $CONTEXT$ "```\n\n(above: reference)\n----\n(below: current work)\n\n```python\n" $BODY$ "```\n\nWrite the code only for the current task. Reply only with code. Avoid code_interpreter.\n"
+JavaScript: "```js\n" $CONTEXT$ "```\n\n(above: reference)\n----\n(below: current work)\n\n```js\n" $BODY$ "```\n\nWrite the code only for the current task. Reply only with code. Do not include comments.\n"
 Markdown: "$CONTEXT$\n$BODY$"
 
 6b. Shorter comment to prompt pattern when context part is empty:
@@ -261,10 +264,11 @@ The rev_info structure holds metadata on our revs, and has the following element
 - fnbuf, a char * holding allocated memory for the filenames
 - revblocks, a chronologically partially-ordered list of historical blocks with metadata
 - n_revblocks, the size of that array
+- cap_revblocks, the allocated capacity of revblocks, also in rev_block-sized units (i.e. not in bytes).
 - revrope, a rope holding the rev contents
 
 For the revblocks we also need a type, so we'll have a rev_block struct as well.
-Then revblocks can be a pointer to a rev_block, and we'll manually manage the memory for it.
+Then revblocks can be a pointer to a rev_block, and we'll manually manage the memory for it, doubling the cap when necessary.
 
 On the rev_block struct we need:
 
@@ -273,7 +277,7 @@ On the rev_block struct we need:
 - a spans for the zero or more IDs this block may have
 - a timestamp, which we will store in seconds since the epoch as a time_t
 
-Because of the inclusion, we must declare rev_block first, followed by rev_info.
+Because of the inclusion, we declare rev_block first, then rev_info.
 */
 
 typedef struct {
@@ -286,8 +290,9 @@ typedef struct {
 typedef struct {
     spans filenames;
     char *fnbuf;
-    rev_block* revblocks;
-    int n_revblocks;
+    rev_block *revblocks;
+    size_t n_revblocks;
+    size_t cap_revblocks;
     rope revrope;
 } rev_info;
 
@@ -360,6 +365,19 @@ typedef struct {
   span response;
   span error;
 } network_ret;
+
+/* #sbv_state @SBV_design
+
+The state struct for the SBV feature.
+*/
+
+typedef struct {
+    int *revblock_indices;
+    int max_index;
+    int current_index;
+    spans curr_block_ids;
+    checksums sorted_line_cksums;
+} sbv_state;
 
 /* #all_functions #replywithok
 */
@@ -522,7 +540,8 @@ We call check_dirs() which creates any missing directories.
 Next we call a function get_code().
 This function reads the files indicated by our config file, populates inp, and handles any code indexing steps.
 
-Next we call get_revs(), which handles reading and indexing all of our revisions (in <cmprdir>/revs).
+Next we call get_revs(), which handles reading and indexing all of our revisions (in <cmprdir>/revs), but before calling this function we make a new rope for the rev contents, on state->revs.revrope, with size 32MiB.
+Even though we're exiting the process, we may as well release the rope, immediately before returning, of course, not here.
 
 @- We call bootstrap(), which updates the bootstrap prompt.
 
@@ -530,13 +549,13 @@ Then we call main_loop().
 
 The main loop reads input in a loop and probably won't return, but just in case, we always call flush() before we return so that our buffered output from prt and friends will be flushed to stdout.
 
-This also just gets us into the habit of calling flush() everywhere, which is pretty much necessary since we always care about precisely when our output becomes visible.
+@- This also just gets us into the habit of calling flush() everywhere, which is pretty much necessary since we always care about precisely when our output becomes visible.
 */
 
 int main(int argc, char** argv) {
     init_spans();
     projfiles_arena_alloc(1 << 14);
-    spans_arena_alloc(1 << 20);
+    spans_arena_alloc(1 << 30);
     checksums_arena_alloc(1 << 30);
 
     ui_state local_state = {0};
@@ -551,7 +570,7 @@ int main(int argc, char** argv) {
     check_conf_vars();
     check_dirs();
     get_code();
-    get_revs();
+    //get_revs(); // needs performance improvements; v9?
     //bootstrap();
     main_loop();
 
@@ -612,6 +631,8 @@ However, we actually want to trim whitespace (such as a newline that must end th
 
 If any of the steps fail, we return and do nothing.
 This will leave openai_key empty, indicating that the API is not available.
+
+(Actually, not any of the steps, update this.)
 */
 
 void read_openai_key() {
@@ -620,18 +641,17 @@ void read_openai_key() {
 
     if (stat(key_path, &st) == -1 || st.st_mode != (S_IRUSR | S_IFREG) || st.st_uid != getuid()) {
         return;
-        //exit_with_error("Invalid file permissions or file does not exist");
     }
 
     int fd = open(key_path, O_RDONLY);
     if (fd == -1) {
-        exit_with_error("Failed to open key file");
+        prt("Failed to open key file");flush_err();exit(1);
     }
 
     span key_span = {cmp.end, cmp.end + st.st_size};
     if (read(fd, cmp.end, st.st_size) != st.st_size) {
         close(fd);
-        exit_with_error("Failed to read key file");
+        prt("Failed to read key file");flush_err();exit(1);
     }
     close(fd);
     cmp.end += st.st_size;
@@ -1325,6 +1345,8 @@ In each of these three loops, we also do something to let the user see the progr
 First, before entering each loop, we clear the screen, then we print the number of things we have to scan, e.g. "Hashing N Files".
 Then, every 16 iterations through the loop, we print on the line below that our progress as "n/N" where n is the current index and N is the total.
 We use terminal escape codes to make sure this always starts flush left, at the beginning of the current line (NOT at the top left of the screen, as that would overwrite the first line of output), and use prt and flush as usual, but without a terminating newline, so that we stay on the same line.
+
+@- TODO: include the endpoint
 */
 
 void checksum_code() {
@@ -1584,6 +1606,7 @@ The current block is always set.
 The index of the block is current_index on the state.
 To get the block as a span the current index is used with state->blocks.
 It is never necessary to bounds-check current_index as it is known to always be in range (and if not, we should crash anyway).
+When displaying block numbers to the user, we add one so that the first block is Block 1 not Block 0.
 */
 /* @block_idx @id_for_block
 
@@ -1766,6 +1789,8 @@ void get_revs() {
     flush();
     exit(0);
     */
+    // before calling get_revs_2 we initialize the rope
+    state->revs.revrope = rope_new(16 * 1024 * 1024);
     get_revs_2();
 }
 
@@ -1811,17 +1836,18 @@ span read_file_into(span filename, rope *r) {
     return file_span;
 }
 
-/* #get_revs_2 @rev_info:all @rope
+/* #get_revs_2 @rope @rev_info
 @- likely will be renamed
 
 void get_revs_2();
 
-We have already a sorted list of revisions.
-That is, the filenames are already populated on the rev_info struct on state.
-However, the revblocks are not.
+This function populates state->revs.
+
+We have already a sorted list of revisions' filenames' basenames already populated on the rev_info struct on state.
+However, the revblocks, which are metadata about these revs, are not set up yet, and that is what we must do here.
+We will set up the revblocks, managing the memory as necessary inside get_revs_2.
 
 We want, for each rev, a sorted list of line hashes for that rev, which we will then use to identify the best matching file, to pick the language to blockize, and then create our chronological sequence of block revs, which we will in turn use for the "U" feature.
-
 We will later probably optimize this to lazily access all revs as needed.
 However, for now we will process them all at once.
 
@@ -1833,109 +1859,1011 @@ We will free it when we return, since we don't need these checksums outside this
 
 So in get_revs_2 we first allocate memory for our sorted checksum arrays, one checksums array per projfile.
 Then we use sorted_line_checksums to get the sorted checksums and populate this.
+This is called the "working set" and is only used as an argument to get_revs_cache_put (which uses it to blockize revs by language).
 
 Then we iterate over the revs themselves, in reverse order.
-
-There is a rope on the rev info which we first must initialize (size = 32MiB).
-For each rev, in reverse order, we first read into the rope using read_file_into.
+For each rev, in reverse order, we first read into the rope (on state->revs.revrope, already initialized) using read_file_into.
+We print "rev hashing: n/N", where the numbers come from our iteration, and with an [H escape code to always appear in the top left (with prt and flush).
 We have the basenames (on `filenames`) but we need to prepend the revdir using prs with "%.s/revs/%.s" with state->cmprdir and the given basename.
-Our rev block spans will point into this rope's memory.
-We DO NOT release the rope here.
+First we put the basename in a variable, bname, as we know we will also need it later if we do a cache put.
+Our rev block spans will point into the memory of the rope (which main will later release).
 
-If the rev file is empty, it contains no blocks and we skip it.
-Otherwise we compare it against the working set.
-Whichever of the working set has the best match (the highest intersection) with the rev we take as indicating the language.
+For each non-empty rev we now need the metadata about the rev blocks.
+(If the rev file is empty, it contains no blocks and we skip it.)
+This metadata we will either read from cache, or calculate and write to cache.
+We call a function get_revs_cache_get(), which returns 0 if the item is not found in the cache.
+Otherwise, the cache read also sets up everything in memory, so we are done with this rev and continue to the next one.
+
+If the cache was a miss, then we both calculate and cache the data for next time with get_revs_cache_put().
+(This takes the working set, the bname, and the contents of the rev as arguments.)
+*/
+
+void get_revs_2() {
+    clear_display();
+    checksums* working_set = malloc(state->files.n * sizeof(checksums));
+    for (int i = 0; i < state->files.n; i++) {
+        working_set[i] = sorted_line_checksums(state->files.a[i].contents);
+    }
+
+    for (int i = state->revs.filenames.n - 1; i >= 0; i--) {
+        prt("\033[Hrev hashing: %d/%d", state->revs.filenames.n - i, state->revs.filenames.n);
+        //prt("rev hashing: %d/%d", state->revs.filenames.n - i, state->revs.filenames.n);
+        flush();
+
+        span bname = state->revs.filenames.a[i];
+        // see comment in get_revs_cache_put
+        //u8* end = cmp.end;
+        span rev_path = prs("%.*s/revs/%.*s", len(state->cmprdir), state->cmprdir.buf, len(bname), bname.buf);
+        span rev_contents = read_file_into(rev_path, &state->revs.revrope);
+        //cmp.end = end;
+
+        if (empty(rev_contents)) {
+            continue;
+        }
+
+        if (!get_revs_cache_get(bname, rev_contents)) {
+            get_revs_cache_put(working_set, bname, rev_contents);
+        }
+    }
+
+    free(working_set);
+}
+
+/* #revs_cache_design @rev_info
+
+This cache is written in an ASCII format on disk.
+
+This format describes the contents of a single rev file, and contains the following:
+
+- a short header
+- one or more sections, each with a short textual header followed by lines containing some data
+  - each one is preceded by a blank line (blank lines are separators, not terminators; N sections uses N-1 blank lines)
+- the section headers are "blocks", "block <n> scs", and "block <n> ids", and may appear in any order, with n being in [1, N], where N is the number of blocks in the rev
+- the "blocks" section is followed by pairs of integers, one per line, defined as start and end offsets (relative to rev file contents) for each block
+- the "blocks" section is the only place where we include per-block data (the length and location) without a block number
+- the "block <n> scs" section contains sorted checksums (scs), one checksum per line, printed in their sorted order as 16-byte hex values printed as %X
+- the "block <n> ids" section contains the ids of block n if it has any (otherwise this block is not printed), printed as integer pairs one per line with the offsets this time being relative to the block itself, i.e. the block "abc" with "b" as block id would have "1,2" as the block id line.
+- the timestamp (also part of the rev block structure, see @rev_info) is excluded from the cache, as it is derived from the bname itself (i.e. it's the key)
+
+The rev cache filenames are <cmprdir>/cache/v8/revs/<bname>, where <bname> corresponds to the rev file <cmprdir>/revs/<bname>.
+
+The header contains lines of the form "<key>: <value>".
+The expected keys:
+
+"Language", "Blocks".
+
+This makes the files more human-readable, recording the language used to find the blocks, and the number found.
+
+The number of blocks listed under the "blocks" line should be equal to the count given by the Blocks header.
+
+For a C file containing a single block, with length 20 bytes, we might see the following cache file:
+
+Language: C
+Blocks: 1
+
+blocks
+0,20
+
+block 1 scs
+0123456789ABCDEF
+
+block 1 ids
+5,12
+
+This indicates that there is only one unique line in the block, having the given checksum (64 bits written as 16 bytes of ASCII hex using 0-F).
+
+There is one id in the block, which can be found by skipping 5 bytes and then reading 7 more (12 - 5).
+
+Note that the offset pairs (e.g. 0,20) under the "blocks" line are relative to the rev (e.g. the rev file's contents span).
+However, the offset pairs under the "block N ids" lines are always relative to the block.
+*/
+/* #get_revs_cache_get @revs_cache_design
+
+int get_revs_cache_get(span bname, span rev_contents);
+
+Dual to get_revs_cache_put, we are given a basename of a rev and the contents of the rev file.
+
+First we store cmp.end, and before returning we will reset it.
+
+We look up the rev cache file using prs to construct the path.
+
+We read the cache file into cmp space.
+
+Then we parse the file by calling a helper function parse_revfile_cache, and return its result.
+
+*/
+
+int get_revs_cache_get(span bname, span rev_contents) {
+    u8* cmp_end_backup = cmp.end;
+    span rev_cache_path = prs("%.*s/cache/v8/revs/%.*s", len(state->cmprdir), state->cmprdir.buf, len(bname), bname.buf);
+    if (!readable_file(rev_cache_path)) return 0;
+    span rev_cache_contents = read_file_into_cmp(rev_cache_path);
+    int result = parse_revfile_cache(bname, rev_cache_contents, rev_contents);
+    cmp.end = cmp_end_backup;
+    return result;
+}
+
+/* #scan_checksum @checksums
+
+checksum scan_checksum(span);
+
+Here we scan 16 hex digits of ASCII input at the start of our input into our checksum type.
+
+This function only returns if it is successful.
+
+@complain_and_exit
+*/
+
+checksum scan_checksum(span input) {
+    if (len(input) < 16) {
+        prt("Input too short for checksum\n");
+        flush();
+        exit(1);
+    }
+
+    checksum result = {0};
+    for (int i = 0; i < 16; ++i) {
+        char c = input.buf[i];
+        if (!isxdigit(c)) {
+            prt("Invalid hex digit in input: %.*s\n", len(input), input.buf);
+            flush();
+            exit(1);
+        }
+        result.__u = (result.__u << 4) | (isdigit(c) ? c - '0' : tolower(c) - 'a' + 10);
+    }
+    
+    return result;
+}
+
+/* #scan_int
+
+int scan_int(span*);
+
+Here we read an int from the initial part of a span.
+The span is modified to indicate how much of the span was consumed.
+
+First we scan for an initial run of digits (only 0-9).
+Then we use atoi to get the value.
+(The .buf can be used directly due to how atoi works).
+We the update the .buf and return.
+
+If the initial chars are not digits, it is an error (in particular, we do not skip whitespace).
+@complain_and_exit
+*/
+
+int scan_int(span* sp) {
+    span s = *sp;
+    u8* start = s.buf;
+
+    while (s.buf < s.end && *s.buf >= '0' && *s.buf <= '9') {
+        s.buf++;
+    }
+
+    if (start == s.buf) {
+        prt("Error: Expected digits but found none.\n");
+        flush();
+        exit(1);
+    }
+
+    int value = atoi((char*)start);
+    sp->buf = s.buf;
+    return value;
+}
+
+/* #parse_int
+
+int parse_int(span);
+
+Here we parse an int off the front of a span.
+
+If the initial chars are not digits, it is an error (in particular, we do not skip whitespace).
+@complain_and_exit
+
+We use atoi to get the value.
+(The .buf can be used directly due to how atoi works).
+*/
+
+int parse_int(span s) {
+    if (empty(s) || !isdigit(*s.buf)) {
+        prt("Error: initial characters are not digits\n");
+        flush();
+        exit(1);
+    }
+    return atoi((char *)s.buf);
+}
+
+/* #scan_hex @scan_int
+
+int scan_hex(span*);
+
+This is the same as #scan_int, except that hex input (0-9, a-f, A-F) is handled, and strtol is used.
+*/
+
+int scan_hex(span* s) {
+    span orig = *s;
+    while (s->buf < s->end && 
+           ((*s->buf >= '0' && *s->buf <= '9') || 
+            (*s->buf >= 'a' && *s->buf <= 'f') || 
+            (*s->buf >= 'A' && *s->buf <= 'F'))) {
+        advance1(s);
+    }
+    if (s->buf == orig.buf) {
+        prt("Invalid hex input\n");
+        flush();
+        exit(1);
+    }
+    char* endptr;
+    int result = strtol((char*)orig.buf, &endptr, 16);
+    s->buf = (u8*)endptr;
+    return result;
+}
+
+/* #parse_hex @parse_int
+
+int parse_hex(span);
+
+Like #parse_int, except that hex input (0-9, a-f, A-F) is handled, and strtol is used.
+*/
+
+int parse_hex(span s) {
+    if (empty(s)) {
+        prt("Error: Empty span provided to parse_hex\n");
+        flush();
+        exit(1);
+    }
+    char *endptr;
+    int value = strtol((char*)s.buf, &endptr, 16);
+    if (endptr == (char*)s.buf) {
+        prt("Error: No valid hexadecimal digits found in span\n");
+        flush();
+        exit(1);
+    }
+    return value;
+}
+
+/* #parse_revfile_cache @revs_cache_design @rev_info:code
+
+int parse_revfile_cache(span bname, span rev_cache, span rev_contents);
+
+*/
+
+#define SECTION_BLOCKS 0
+#define SECTION_SCS 1
+#define SECTION_IDS 2
+
+int parse_revfile_cache(span bname, span rev_cache, span rev_contents) {
+  span line;
+  int n_blocks = -1;
+  int n_existing_revblocks = state->revs.n_revblocks;
+
+  while (!empty(rev_cache)) {
+    line = next_line(&rev_cache);
+
+    if (empty(line)) break; // end header section
+
+    if (starts_with(line, S("Language: "))) continue;
+    else if (starts_with(line, S("Blocks: "))) {
+      n_blocks = parse_int(skip_n(line, 8));
+    } else {
+      prt("Unknown header line: %.*s\n", len(line), line.buf);
+    }
+  }
+
+  //spans_arena_push();
+
+  while (!empty(rev_cache)) {
+    int section_type, block_number;
+    int failure;
+    parse_section_header_line(&failure, &section_type, &block_number, &rev_cache);
+    if (section_type < 0) return 0;
+    int rev_block_idx = n_existing_revblocks + block_number - 1;
+    switch (section_type) {
+      case SECTION_BLOCKS:
+        parse_blocks_lines(&failure, n_blocks, rev_contents, &rev_cache);
+        break;
+      case SECTION_SCS:
+        parse_scs_lines(&failure, rev_block_idx, &rev_cache);
+        break;
+      case SECTION_IDS:
+        parse_ids_lines(&failure, rev_block_idx, &rev_cache);
+        break;
+    }
+    if (failure) return 0;
+  }
+
+  //spans_arena_pop();
+  return 1;
+}
+
+/* #parse_section_header_line @revs_cache_design @parse_revfile_cache:code
+
+void parse_section_header_line(int *failure, int *section_type, int *block_number, span *rev_cache);
+
+Here we parse a single "section header line", by which we mean one of "blocks", "block <n> scs", or "block <n> ids".
+
+First we read the first line off rev_cache.
+
+We then parse it, handling each type of line.
+
+If anything goes wrong or the line does not exactly match one of these patterns, we set *failure to a non-zero value and return.
+
+If it works, we set *section_type to one of the SECTION_* constants, and *block_number to the <n> if appropriate.
+
+*/
+
+void parse_section_header_line(int *failure, int *section_type, int *block_number, span *rev_cache) {
+    span line = next_line(rev_cache);
+    wrs(line);terpri();flush();
+    *failure = 0;
+    *section_type = -1;
+    *block_number = -1;
+
+    if (span_eq(line, S("blocks"))) {
+        *section_type = SECTION_BLOCKS;
+    } else if (starts_with(line, S("block ")) && ends_with(line, S(" scs"))) {
+        *section_type = SECTION_SCS;
+        *block_number = parse_int(skip_n(line, 6));
+    } else if (starts_with(line, S("block ")) && ends_with(line, S(" ids"))) {
+        *section_type = SECTION_IDS;
+        *block_number = parse_int(skip_n(line, 6));
+    } else {
+        *failure = 1;
+    }
+}
+
+/* #parse_blocks_lines @revs_cache_design @rev_info:code
+
+void parse_blocks_lines(int *failure, int n_blocks, span rev_contents, span* rev_cache);
+
+All errors we report by setting *failure to a non-zero value and returning.
+
+Here we parse "blocks" section integer pairs off the front of rev_cache until meeting a blank line.
+
+We iterate over lines, until finding a blank one.
+We also keep track of how many lines we have handled.
+
+In each line, we split it at the comma.
+
+If it does not contain a comma, that is an error.
+
+We parse_int both the ints.
+We interpret the ints relative to rev_contents, which gives us a new span.
+
+We use revblocks, n_revblocks, and cap_revblocks (on state->revs) to manage the revblocks array.
+Specifically, if necessary, we double the cap and use realloc.
+If it is zero, doubling won't work so we set it to 256 instead.
+
+We then extend revblocks, with the new span being the .contents of the new rev_block.
+
+If the number of lines we have handled is not equal to n_blocks, that is an error.
+*/
+
+void parse_blocks_lines(int *failure, int n_blocks, span rev_contents, span* rev_cache) {
+    int line_count = 0;
+    while (!empty(*rev_cache)) {
+        span line = next_line(rev_cache);
+        if (empty(line)) break; // Find blank line
+
+        line_count++;
+        int comma_index = find_char(line, ',');
+        if (comma_index == -1) {
+            *failure = 1;
+            return;
+        }
+
+        span start_span = take_n(comma_index, &line);
+        advance(&line, 1); // Skip comma
+        span end_span = line;
+
+        int start = parse_int(start_span);
+        int end = parse_int(end_span);
+        if (end <= start) {
+            *failure = 1;
+            return;
+        }
+
+        span block_contents = { .buf = rev_contents.buf + start, .end = rev_contents.buf + end };
+
+        if (state->revs.n_revblocks == state->revs.cap_revblocks) {
+            state->revs.cap_revblocks *= 2;
+            if (state->revs.cap_revblocks == 0) state->revs.cap_revblocks = 256;
+            state->revs.revblocks = realloc(state->revs.revblocks, state->revs.cap_revblocks * sizeof(rev_block));
+            if (!state->revs.revblocks) {
+                *failure = 1;
+                return;
+            }
+        }
+
+        rev_block* new_block = &state->revs.revblocks[state->revs.n_revblocks++];
+        new_block->contents = block_contents;
+    }
+
+    if (line_count != n_blocks) {
+        *failure = 1;
+    }
+}
+
+/* #parse_scs_lines @rev_cache_design @rev_info:code @checksums @scan_checksum
+
+void parse_scs_lines(int *failure, int rev_block_idx, span* rev_cache);
+
+Here we parse a section body of sorted checksums lines off the front of rev_cache.
+
+We first iterate over next lines of a copy until we find a blank line, so we know how many there are.
+
+Then we allocate a checksums of the right number, assigning it onto the appropriate revblock on (state->revs.revblocks).
+
+We iterate over the next_lines of rev_cache itself, and use scan_checksum on each line, pushing each one onto the sorted_checksums on the revblock.
+*/
+
+void parse_scs_lines(int *failure, int rev_block_idx, span* rev_cache) {
+    span copy = *rev_cache;
+    int count = 0;
+    while (!empty(copy)) {
+        span line = next_line(&copy);
+        if (empty(trim(line))) break;
+        count++;
+    }
+
+    checksums cks = checksums_alloc(count);
+    state->revs.revblocks[rev_block_idx].sorted_line_cksums = cks;
+
+    for (int i = 0; i < count && !empty(*rev_cache); i++) {
+        span line = next_line(rev_cache);
+        if (empty(trim(line))) break;
+        checksum ck = scan_checksum(line);
+        checksums_push(&cks, ck);
+    }
+}
+
+/* #parse_ids_lines @rev_cache_design
+
+void parse_ids_lines(int *failure, int rev_block_idx, span* rev_cache);
+
+Here we parse ids lines off the front of rev_cache until meeting a blank line.
+
+If there is any parse failure we will indicate that by setting *failure to 1.
+
+First we make a copy and count the non-blank lines.
+
+Then we alloc a spans to hold the ids, and we assign it directly in place onto state->revs.revblocks with the given index.
+We put the contents span in a variable for use later.
+
+We iterate next lines again directly off rev_cache.
+
+For each line we split on the comma; if there is no comma it is an error.
+Then we parse the ints before and after the comma.
+We iterpret them as offsets into the contents of the revblock.
+Adding them to the .buf of the contents gives us a new span, which we push onto the ids for the revblock.
+*/
+
+void parse_ids_lines(int *failure, int rev_block_idx, span* rev_cache) {
+    span rev_cache_copy = *rev_cache;
+    int non_blank_lines = 0;
+
+    while(!empty(*rev_cache)) {
+        span line = next_line(rev_cache);
+        if (len(trim(line)) == 0) break;
+        non_blank_lines++;
+    }
+
+    spans ids = spans_alloc(non_blank_lines);
+    state->revs.revblocks[rev_block_idx].ids = ids;
+    span contents = state->revs.revblocks[rev_block_idx].contents;
+
+    while (!empty(rev_cache_copy)) {
+        span line = next_line(&rev_cache_copy);
+        if (len(trim(line)) == 0) break;
+        span comma = S(",");
+        int comma_idx = find_char(line, comma.buf[0]);
+        if (comma_idx == -1) {
+            *failure = 1;
+            return;
+        }
+
+        span first_part = take_n(comma_idx, &line);
+        advance(&line, 1); // Skip the comma
+        span second_part = line;
+
+        int first_offset = parse_int(first_part);
+        int second_offset = parse_int(second_part);
+
+        span id_span;
+        id_span.buf = contents.buf + first_offset;
+        id_span.end = contents.buf + second_offset;
+        spans_push(&ids, id_span);
+    }
+}
+
+/* #get_revs_cache_put @revs_cache_design @rev_info:code
+
+void get_revs_cache_put(checksums* working_set, span bname, span content);
+
+This function takes a working set, which we use to determine the best matching language for blockizing the rev.
+This is an array of sorted line checksums, indexed congruently with state->files.
+
+We also get the basename of the rev's file on disk, and the contents of the rev, as a span which points into the rev rope.
+
+We set up a size for the working set by getting the .n of projfiles into a variable.
+
+If the content is empty, there is nothing to do for this rev, so we do nothing and return.
+
+We compare this file against the working set.
+We use sorted_line_checksums on the file contents; this gives us a "fingerprint" of the lines in the file.
+Whichever of the working set has the best match (the highest intersection) with this fingerprint we take as indicating the language.
 In the event of a tie, we do not care which is used.
-If there is no match, we just skip the rev.
+If there is no match, we just do nothing.
 
-Since the indexes of the working set match the projfiles, we can use the .language on the projfile with the same index.
+Since the working set indices match the projfiles, we use the .language on the projfile with the same index.
 
 We then use find_blocks_language to get the blocks, assuming that language, for the rev.
 
-Finally, we will populate the rev_info structure with each of the blocks from that rev.
-Once we have gotten the blocks, we can realloc the revblocks if necessary to have room for the blocks from that rev.
+Finally, we will populate the rev_info structure with each of the blocks from that rev, also writing to the cache.
+Once we have gotten the blocks, we can realloc the revblocks if necessary to have room for the blocks from that rev, doubling the capacity.
 
-For each rev block we must store:
+For each rev block we must find:
 - a timestamp,
 - a spans of ids,
 - sorted checksums of lines,
 - the contents.
 
-The timestamp for each block comes from the filename for the rev.
+The timestamp for each block comes from the base filename for the rev.
 We have another function to get a time_t from the filenames (which follow a consistent format).
 
-Note that as we are going through the revs in reverse chronological order, that is the order our rev blocks are stored in.
+Note that as we are going through the revs in reverse chronological order, that is the order our rev blocks are also stored in.
 
 We use sorted_line_checksums on each block, as this will be used to compare the blocks for equality.
 
 We also have a function to get the ids for the block.
+
+Once we have the data we then write it into a cache file in an ASCII format as given by #revs_cache_design above.
+
+The name of this file is "<cmprdir>/cache/v8/revs/<bname>".
+We expand this using prs and the cmprdir (from state) and bname (one of our arguments).
+Then we call out2atp to redirect the output to append to that constructed path.
+We call pr_revinfo(), which outputs the revinfo data, and then out_rst.
+
+@- The idea of the name out2atp is that we are appending to a path; if we appended to a file, the file would need to exist, but a path is more abstract and it will be created; this is very similar to redirection of expressions into files as seen in awk and similar.
+
+@- TODO: mmap the files into the rope; this lets the OS page out the memory which we mostly won't be needing to access
 */
 
-void get_revs_2() {
-    int i, j;
-    rope r = rope_new(32 * 1024 * 1024);
-    checksums* working_set = malloc(sizeof(checksums) * state->files.n);
-    
-    for (i = 0; i < state->files.n; ++i) {
-        working_set[i] = sorted_line_checksums(state->files.a[i].contents);
-    }
-    
-    for (i = state->revs.filenames.n - 1; i >= 0; --i) {
-        span rev_file = prs("%.*s/revs/%.*s", len(state->cmprdir), state->cmprdir.buf, len(state->revs.filenames.a[i]), state->revs.filenames.a[i].buf);
-        span content = read_file_into(rev_file, &r);
-        
-        if (empty(content)) continue;
-        
-        int best_match = -1, best_intersection = -1;
-        for (j = 0; j < state->files.n; ++j) {
-            int intersection = cksums_intersection(working_set[j], sorted_line_checksums(content));
-            if (intersection > best_intersection) {
-                best_intersection = intersection;
-                best_match = j;
-            }
+void get_revs_cache_put(checksums* working_set, span bname, span content) {
+    if (empty(content))
+        return;
+
+    size_t projfile_count = state->files.n;
+    int best_match_index = -1;
+    int max_intersection = -1;
+    checksums rev_cksums = sorted_line_checksums(content);
+
+    for (size_t i = 0; i < projfile_count; ++i) {
+        int intersection = cksums_intersection(rev_cksums, working_set[i]);
+        if (intersection > max_intersection) {
+            max_intersection = intersection;
+            best_match_index = i;
         }
-        
-        if (best_match == -1) continue;
-        
-        span language = state->files.a[best_match].language;
-        spans blocks = find_blocks_language(content, language);
-        
-        state->revs.revblocks = realloc(state->revs.revblocks, sizeof(rev_block) * (state->revs.n_revblocks + blocks.n));
-        
-        for (j = 0; j < blocks.n; ++j) {
-            state->revs.revblocks[state->revs.n_revblocks + j].contents = blocks.a[j];
-            state->revs.revblocks[state->revs.n_revblocks + j].sorted_line_cksums = sorted_line_checksums(blocks.a[j]);
-            state->revs.revblocks[state->revs.n_revblocks + j].ids = ids_for_block(blocks.a[j]);
-            state->revs.revblocks[state->revs.n_revblocks + j].timestamp = parse_rev_fname(state->revs.filenames.a[i]);
-        }
-        
-        state->revs.n_revblocks += blocks.n;
     }
-    
-    free(working_set);
+
+    if (best_match_index == -1)
+        return;
+
+    span language = state->files.a[best_match_index].language;
+    spans blocks = find_blocks_language(content, language);
+
+    //
+    int prev_n_revblocks = state->revs.n_revblocks;
+
+    if (state->revs.n_revblocks + blocks.n > state->revs.cap_revblocks) {
+        state->revs.cap_revblocks = 2 * (state->revs.n_revblocks + blocks.n);
+        state->revs.revblocks = realloc(state->revs.revblocks, state->revs.cap_revblocks * sizeof(rev_block));
+    }
+
+    time_t timestamp = parse_rev_fname(bname);
+    rev_block *revblocks = state->revs.revblocks + state->revs.n_revblocks;
+
+    for (size_t i = 0; i < blocks.n; ++i) {
+        revblocks[i].contents = blocks.a[i];
+        revblocks[i].sorted_line_cksums = sorted_line_checksums(blocks.a[i]);
+        revblocks[i].ids = ids_for_block(blocks.a[i]);
+        revblocks[i].timestamp = timestamp;
+    }
+
+    state->revs.n_revblocks += blocks.n;
+
+    span cmprdir = state->cmprdir;
+    u8* end = out.end;
+    u8* ce = cmp.end;
+    //span cache_path = prs("%s/cache/v8/revs/%s", s(cmprdir), s(bname));
+    //char *cache_path;
+    //asprintf(&cache_path, "%.*s/cache/v8/revs/%.*s", len(cmprdir), cmprdir.buf, len(bname), bname.buf);
+    //discard();
+    //cmp.end = end; // this can't be here, must improve the library API
+    //out_sav out_state = out2atp(S(cache_path));
+    pr_revinfo(language, blocks, prev_n_revblocks, content);
+    //flush();
+    //out_rst(out_state);
+    span output = (span){end, out.end};
+    span cache_path = prs("%.*s/cache/v8/revs/%.*s", len(cmprdir), cmprdir.buf, len(bname), bname.buf);
+    write_to_file_span(output, cache_path, 1);
+    out.end = end;
+    cmp.end = ce;
 }
 
-/* #select_block_version @rev_info:code @blocks @checksums:code
+/* #pr_revinfo @revs_cache_design
 
-void select_block_version();
+void pr_revinfo(span language, spans blocks, int prev_n_revblocks, span contents);
 
-We get the sorted checksums for the current block by calling a function.
+For each section mentioned in #revs_cache_design, we output the data in the given ASCII format, calling out to appropriate helper functions as necessary.
+This populates the cache for an entire rev, handling all the blocks in a given rev at once.
 
-(The sorted checksums are also unique.)
+void pr_checksum(checksum);
+void pr_relative_span(span,span);
 
+In pr_checksum we print a checksum as 16 ASCII digits, using the alphabet 0-9 and A-F.
+Note that we specifically print uppercase hex digits, e.g. using %X rather than %x in C format strings.
+
+In pr_relative_span we print two non-negative integers separated by a comma, i.e. "%ld,%ld".
+The integers are the .buf and the .end offsets of $2, both expressed relative to the .buf of $1.
+In other words, the function prints the location of the second span relative to the first one, as a pair of integers both in [0,len($1)].
+To rehydrate this data back into a span, it must be scanned relative to a containing span, e.g. a memmapped file.
+
+In pr_revinfo we print the block ids relative to the block, for example, `pr_relative_span(rb.contents, rb.ids.a[k])` for some revblock rb and 0 < k < n ids.
+
+The pr_revinfo function takes language and blocks as arguments.
+The reason the blocks are passed in as an argument (rather than looking them up on state->revs) is that we only want to handle (or iterate over) one rev's worth of blocks.
+First we print the header lines with the given language and the .n of the blocks.
+Then we iterate over the blocks three times.
+The first time we are printing the offsets (from the rev) for each block below the "blocks" line.
+The second time we are printing a "block N scs" line for each block followed by the sorted checksums, with the help of pr_checksum.
+Finally we are printing a "block N ids" line for each block if it has at least one id, followed by the offset pairs (this time block-relative), one per line of the ids for that block (note that a block is allowed to have zero or more ids).
+
+Here we write all three functions.
+*/
+
+void pr_checksum(checksum cksum) {
+    prt("%016lX\n", cksum.__u);
+}
+
+void pr_relative_span(span container, span subsection) {
+    prt("%ld,%ld\n", subsection.buf - container.buf, subsection.end - container.buf);
+}
+
+void pr_revinfo(span language, spans blocks, int prev_n_revblocks, span contents) {
+    prt("Language: %.*s\nBlocks: %ld\n\n", len(language), language.buf, blocks.n);
+    
+    prt("blocks\n");
+    for (size_t i = 0; i < blocks.n; i++) {
+        span block = blocks.a[i];
+        pr_relative_span(contents, block);
+    }
+
+    for (size_t i = 0; i < blocks.n; i++) {
+        span block = blocks.a[i];
+        checksum* scs = sorted_line_checksums(block).a;
+        size_t scs_count = sorted_line_checksums(block).n;
+
+        prt("\nblock %ld scs\n", i + 1);
+        for (size_t j = 0; j < scs_count; j++) {
+            pr_checksum(scs[j]);
+        }
+    }
+
+    for (size_t i = 0; i < blocks.n; i++) {
+        rev_block rb = state->revs.revblocks[prev_n_revblocks + i];
+        //rev_block rb = blocks.a[i];
+        if (rb.ids.n > 0) {
+            prt("\nblock %ld ids\n", i + 1);
+            for (size_t j = 0; j < rb.ids.n; j++) {
+                pr_relative_span(rb.contents, rb.ids.a[j]);
+            }
+        }
+    }
+    //flush();
+}
+
+/*
+*/
+ /*
+We assume certain wr_* functions to write or (pr_* to print?) primitives, including checksum.
+These will have matching sc_* functions, and we can write all of them generically.
+This should be an example of our general approach to printing and scanning or parsing.
+
+pr_checksum
+*/
+/* #SBV_design @rev_info
+
+We will maintain some state for the "select block version" ui that will be shared among several routines.
+
+Specifically:
+
+- we have a list of blocks that are judged as similar enough to the current one to be prior versions of it.
+    - these are just indices into the revblocks, so maintained as an array of ints
+    - this array is malloc'd in select_block_version and freed at the end, and has size equal to state->revs.n_revblocks, the theoretical max
+    - called revblock_indices (since they are indices into the revblocks on state)
+- we track the highest index on this block list that has already been assigned, `max_index`
+- we also track the currently displayed index, initially zero, affected by j/k, `current_index`
+- we have the block ids of the current block, used for similarity determination, `curr_block_ids` as a spans.
+- we have a checksums, `sorted_line_cksums`, for the current block's fingerprint.
+
+As the user goes through the undo history with j/k, the revblocks will be searched to find the next sufficiently similar block (when moving past the ones already found).
+The max_index represents the "high water mark" of how far back we have gone with j/k; only hitting "j" can ever bump max_index.
+
+So we have several functions below:
+- to find the next match and add it if not already added
+- to display the current state of things
+- to actually handle keyboard input and return a "keyboard event".
+
+All of these take a pointer to our state struct for this feature.
+The entry point is select_block_version, which sets up this struct and loops.
+
+We call the struct the sbv_state after the name of the feature.
+*/
+/* #getkey
+
+int getkey();
+
+Here we handle the keyboard input.
+
+This may be abstracted later to replace getch.
+
+First we declare some constants for non-ASCII and non-UTF8 keyboard events, such as arrow keys.
+Since ordinary 8-bit char inputs will be in range 0-255, we start with 256.
+These are ints and we define for now just the four arrow keys ARROW_{U,D,L,R}.
+(Ordinary ASCII (and UTF-8) input will just be returned as itself.)
+
+We turn off canonical mode and echo on the terminal, and set the minimum characters to 0 and the timeout to 1/10 of a second.
+
+Then we read a character, handling EAGAIN until we get input.
+
+If the input is an escape char, we read the next two bytes and handle them with an int used as a state machine.
+If they are one of the arrow key escape sequences then we will store our arrow key constant as the ret value.
+All other non-escape characters will be sent as themselves of course.
+Any sequence starting with escape that isn't followed by two more bytes of input without timeout will just be sent as an escape itself ('\033').
+Finally, an escape sequence that's not an arrow key will be ignored (returning to the EAGAIN loop).
+
+Once we have some input that we are ready to return, we set the terminal back the way it was before doing so.
+
+Here we define the four arrow key constants and the getkey function.
+*/
+
+#define ARROW_U 256
+#define ARROW_D 257
+#define ARROW_R 258
+#define ARROW_L 259
+
+int getkey() {
+    struct termios oldt, newt;
+    int ret;
+
+    tcgetattr(STDIN_FILENO, &oldt);
+    newt = oldt;
+    newt.c_lflag &= ~(ICANON | ECHO);
+    newt.c_cc[VMIN] = 0;
+    newt.c_cc[VTIME] = 1;
+    tcsetattr(STDIN_FILENO, TCSANOW, &newt);
+
+    while (1) {
+        char c;
+        int n = read(STDIN_FILENO, &c, 1);
+        if (n < 0) {
+            if (errno == EAGAIN) continue;
+            break;
+        }
+
+        if (c == '\033') {
+            char seq[2];
+            ret = '\033';
+            if (read(STDIN_FILENO, &seq[0], 1) == 0) break;
+            if (read(STDIN_FILENO, &seq[1], 1) == 0) break;
+
+            if (seq[0] == '[') {
+                switch (seq[1]) {
+                    case 'A': ret = ARROW_U; goto restore;
+                    case 'B': ret = ARROW_D; goto restore;
+                    case 'C': ret = ARROW_R; goto restore;
+                    case 'D': ret = ARROW_L; goto restore;
+                }
+            }
+            //ret = '\033'; goto restore;
+            continue;
+        }
+
+        ret = (unsigned char)c;
+        break;
+    }
+
+restore:
+    tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
+    return ret;
+}
+
+/* #sbv_display @SBV_design @currentblock
+
+void sbv_display(sbv_state* sbvs);
+
+We have (from the feature-specific state) the index of the current rev block to be displayed, and here we display it.
+
+To actually get this rev block index, we take current_index on the sbv state as an index into the revblock indices.
+That revblock index in turn indexes the state->revs.revblocks, which contains the block contents and the timestamp, both of which we need here.
+
+First we clear the display.
+
+We print on the top line, "Block N, ver: <offset>, <timestamp>, <help>", where N is the current block number, <offset> is either "curr" if it is the current version (which is the 0th current_index on the sbv_state, which is the current state of the block (as there is always a rev for the current state)), or a negative number, which is just "-" followed by the current index on the sbv state, i.e. the number of revs that the user has gone back in the history, and the timestamp is the timestamp for that revblock, in the format "YYYY-MM-DD hh:mm:ss", in the local time zone and accounting for DST.
+(For the negative numbers or "curr", we set up a char* first.)
+
+The "help" part is a short keyboard gloss, "j/k, Enter, q", summarizing the basic keyboard commands in this mode.
+
+Then we print the contents with wrs, and then below those we print the same "Block..." line again, but without a newline this time.
+
+@- Then we use count_physical_lines to print the terminal_rows - 2 rows of the actual content of the block.
+@- (Later we will support pagination in this mode but not yet.)
+*/
+
+void sbv_display(sbv_state* sbvs) {
+    char offset[32];
+    char timestamp[32];
+    rev_block* rb = &state->revs.revblocks[sbvs->revblock_indices[sbvs->current_index]];
+    
+    clear_display();
+
+    if (sbvs->current_index == 0) {
+        snprintf(offset, sizeof(offset), "curr");
+    } else {
+        snprintf(offset, sizeof(offset), "-%d", sbvs->current_index);
+    }
+
+    struct tm *tm_info = localtime(&rb->timestamp);
+    strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", tm_info);
+
+    prt("Block %d, ver: %s, %s, j/k, Enter, q\n", state->current_index + 1, offset, timestamp);
+    wrs(rb->contents);
+    prt("Block %d, ver: %s, %s, j/k, Enter, q", state->current_index + 1, offset, timestamp);
+    flush();
+}
+
+/* #sbv_populate @SBV_design @blocks @checksums:code
+
+void sbv_populate(sbv_state* sbvs);
+int block_id_match(spans curr_ids, spans rev_ids);
+int rev_block_match(sbv_state* sbvs, rev_block* current_revblock);
+
+(Here we write all three functions.)
+
+There is a current index (on the feature-specific state) which changes in response to j/k.
+Here we need to make sure that if the current index is greater than the max index (which records the amount of the revblock_indices that we have populated already), that we populate the corresponding array element.
+
+If the current index is greater than the max index, it will only ever by by one.
+
+As a special case, if the max index is -1, the current_index is 0, then we populate the 0th revblock index and also update max_index, by iterating over the revblocks until we find one which is span_eq to the current value of the block that we are actually on (i.e. the value of state->blocks indexed by state->current_index), and setting the 0th revblock index to that first matching revblock in the history.
+
+So we get the current max index, get the corresponding revblock index, so that we can start iterating over the revblocks from that point.
 Then we go back through the revblocks (on state->revs).
 
 (That is, actually, we are going forward through the list, but as they are in reverse chronological order, this is backwards in time.)
 
-For each of the rev blocks, we print three numbers: the number of unique lines from the current block, the number of unique lines from the rev block, and the intersection (which we have a function to find).
+We find the next revblock that matches our similarity criteria, as follows:
+- if the revblock has the same contents (as per span_eq) as any of the revblocks already indexed (by the revblock_indices) as a version of this block, then we don't want to see it again, so we consider this a non-match.
+- if any of the block ids for the current block match any of the block ids for the revblock, then we consider it a match
+- otherwise we find three numbers: the number of unique lines from the current block, the number of unique lines from the rev block, and the intersection (which we have a function to find).
 (The unique line counts are just .n on the respective sorted checksums.)
+(The sorted checksums are also unique.)
+If each of these numbers is greater than 8 we consider this a match.
+
+Finally, if there is no other match, we will leave max_index as it originally was, and decrement current_index (essentially indicating that the 'j' or 'Down' failed because there is nothing further down).
+
+*/
+
+void sbv_populate(sbv_state* sbvs) {
+    int i, max_idx = sbvs->max_index;
+    if (sbvs->current_index > max_idx) {
+        if (max_idx == -1 && sbvs->current_index == 0) {
+            for (i = 0; i < state->revs.n_revblocks; i++) {
+                if (span_eq(state->blocks.a[state->current_index], state->revs.revblocks[i].contents)) {
+                    sbvs->revblock_indices[0] = i;
+                    sbvs->max_index = 0;
+                    return;
+                }
+            }
+        } else {
+            for (i = sbvs->revblock_indices[max_idx] + 1; i < state->revs.n_revblocks; i++) {
+                if (rev_block_match(sbvs, &state->revs.revblocks[i])) {
+                    sbvs->revblock_indices[++sbvs->max_index] = i;
+                    return;
+                }
+            }
+        }
+        sbvs->current_index--;
+    }
+}
+
+int block_id_match(spans curr_ids, spans rev_ids) {
+    for (int i = 0; i < curr_ids.n; i++) {
+        for (int j = 0; j < rev_ids.n; j++) {
+            if (span_eq(curr_ids.a[i], rev_ids.a[j])) {
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+int rev_block_match(sbv_state* sbvs, rev_block* current_revblock) {
+    for (int i = 0; i <= sbvs->max_index; i++) {
+        if (span_eq(current_revblock->contents, state->revs.revblocks[sbvs->revblock_indices[i]].contents)) {
+            return 0;
+        }
+    }
+    if (block_id_match(sbvs->curr_block_ids, current_revblock->ids)) {
+        return 1;
+    }
+    int curr_uniq = sbvs->sorted_line_cksums.n;
+    int rev_uniq = current_revblock->sorted_line_cksums.n;
+    int intersection = cksums_intersection(sbvs->sorted_line_cksums, current_revblock->sorted_line_cksums);
+    return (curr_uniq > 8 && rev_uniq > 8 && intersection > 8);
+}
+
+/* #select_block_version @SBV_design @getkey
+
+void select_block_version();
+
+We set up an sbv_state struct sbvs.
+The max_index begins at -1, the current_index at 0, and we allocate (and later free) the memory for the revblock indices.
+We get the block ids for the current block by calling a function and store them on the feature state struct.
+We calculate the sorted checksums for the current block.
+Then we enter our loop, which:
+- calls sbv_populate to find the currently displayed block revision if necessary
+- displays the current state
+- gets a key, and then:
+  - if it is q or Esc, do nothing and simply return (except our cleanup)
+  - if it is j/k or an up/down arrow, we adjust the current index on the sbv state
+    - if j or down, we always increment current_index
+    - however if k or up, we only decrement if 0 < current_index
+  - if it is Enter, we replace the block with the new contents using replace_block, and cleanup and return.
+*/
+
+void select_block_version() {
+    sbv_state sbvs;
+    sbvs.max_index = -1;
+    sbvs.current_index = 0;
+    sbvs.revblock_indices = (int *)malloc(state->revs.n_revblocks * sizeof(int));
+    sbvs.curr_block_ids = ids_for_block(state->blocks.a[state->current_index]);
+    sbvs.sorted_line_cksums = sorted_line_checksums(state->blocks.a[state->current_index]);
+
+    while (1) {
+        sbv_populate(&sbvs);
+        sbv_display(&sbvs);
+        int key = getkey();
+
+        if (key == 'q' || key == 27) {
+            break;
+        } else if (key == 'j' || key == ARROW_D) {
+            sbvs.current_index++;
+        } else if (key == 'k' || key == ARROW_U) {
+            if (sbvs.current_index > 0) sbvs.current_index--;
+        } else if (key == '\n') {
+            replace_block(state->revs.revblocks[sbvs.revblock_indices[sbvs.current_index]].contents);
+            break;
+        }
+    }
+
+    free(sbvs.revblock_indices);
+}
+
+/*
+ #select_block_version @rev_info:code @blocks @checksums:code
+
+void select_block_version();
+
+
+
+
 
 If each of the three numbers is greater than 8, then we store this block as a probable match.
 If this probable match is different (per span_eq) from the previous probably match, then we print it with wrs.
 
 @press_any_key
 
-*/
 
 void select_block_version() {
     checksums current_sorted_cksums = sorted_line_checksums(state->blocks.a[state->current_index]);
@@ -1950,6 +2878,7 @@ void select_block_version() {
         if (current_unique > 8 && rev_unique > 8 && intersection > 8) {
             span rev_block_span = rb->contents;
             if (prev_idx == -1 || !span_eq(state->revs.revblocks[prev_idx].contents, rev_block_span)) {
+                clear_display();
                 wrs(rev_block_span);
 
                 prt("Press any key to continue...");
@@ -1962,6 +2891,7 @@ void select_block_version() {
     }
 }
 
+*/
 /* @checksums
 checksums sorted_line_checksums(span);
 
@@ -2011,6 +2941,27 @@ checksums sorted_line_checksums(span input) {
     return cksums;
 }
 
+/* #sorted_line_checksums_cached
+
+checksums sorted_line_checksums_cached(span fn, span content);
+
+In this caching version of sorted_line_checksums, we first construct a cache path, check if it exists and parse and return the contents if so, and otherwise calculate the sorted checksums (by calling the base function) and then cache that result into that same file.
+
+First we set up our filenames:
+
+- "<cmprdir>/revs/<fn>" the rev file
+- "<cmprdir>/cache/revs/scs_v1/<fn>" the corresponding cached sorted checksums
+
+(Here <cmprdir> comes from state and the rev base filename <fn> is our first argument.)
+(We put both of these in spans using prs.)
+@-       span rev_file = prs("%.*s/revs/%.*s", len(state->cmprdir), state->cmprdir.buf, len(state->revs.filenames.a[i]), state->revs.filenames.a[i].buf);
+@-       //span rev_file_cache = concat(concat(state->cmprdir,S("/revs/cache/v1/")),state->revs.filenames.a[i]);
+
+We use spanio library calls to get the contents of the cache file (also in cmp space) if it exists.
+We will use two other functions, one to parse and one to print the cache file, which will be an ASCII list of 16-byte hex checksums one per line, so 17 bytes per line per rev.
+
+I kind of wonder at this point if I shouldn't be simply caching the language used for blockizing instead of caching the checksums at all.
+*/
 /* #cksums_intersection @checksums
 
 int cksums_intersection(checksums,checksums);
@@ -2366,14 +3317,16 @@ char getch(void) {
 
 In main_loop, we initialize:
 
-- the current index to 0,
-- the marked index to -1 indicating that we are not in visual selection mode.
+- the current index (this is the j/k index) to 0,
+- the marked index to -1 (indicating that we are not in visual selection mode).
 
 In our loop, we call check_conf_vars(), which just handles the case where some essential configuration variables aren't set.
 
 Next we clear the terminal, then print the current block or blocks.
 Then we will wait for a single keystroke of keyboard input using our getch() above.
-Just before we call this function, we also call flush(), which just prevents us having to call it an a lot of other places all over the code.
+@- (This will change to something like we are using in the select-menu loop elsewhere.)
+Just before we call this function, we also call flush(), which just prevents us having to call it a lot of other places all over the code.
+@- probably both the clear_display and the flush should be in print_current_blocks
 
 We also define a helper function print_current_blocks; we include just the declaration for that function below.
 (Reminder: we never write `const` in C.)
@@ -2535,7 +3488,7 @@ First we determine which of marked_index and current_index is lower and make tha
 
 The difference between the two is then the number of selected blocks.
 At this point we know how many blocks we are displaying.
-Finally we pass state, inclusive start, and exclusive end of range to another function handles rendering.
+Finally we pass state, inclusive start, and exclusive end of range to another function that handles rendering.
 
 Helper functions:
 
@@ -2581,7 +3534,7 @@ We call this function (with the ui state and our logical-physical mapping) and t
 We include a forward declaration for our helper functions.
 */
 
-//* *** manual fixup ***/
+//* *** manually stubbed, needs thought ***/
 
 void render_block_range(int start, int end) {
 
@@ -2614,7 +3567,7 @@ We support the following single-char inputs:
 - r, Request an LLM rewrite the code part of the block based on the comment part; silently updates clipboard
 - R, kin to "r", which reads current clipboard contents back into the block, replacing the code part
 @- - u, undo
-- U, List versions of current block
+@- - U, List versions of current block -- disabled until caching/performance work
 - space/b, paginate down or ("back") up within a block
 - B, do a build by running the build command you provide
 @- - v, sets the marked point to the current index, switching to "visual" selection mode, or leaves visual mode if in it
@@ -2672,7 +3625,7 @@ void handle_keystroke(char input) {
             //rev_decr();
             break;
         case 'U':
-            select_block_version();
+            //select_block_version();
             break;
         case ' ':
             page_down();
@@ -3015,7 +3968,7 @@ Then we print the selected one.
 Finally we print the rest of the options, up to the max we can fit.
 Then we move the cursor to the last line with an escape code, and print the user prompt, without a newline:
 
-"Use j/k or Up/Down to move, Enter to select, and q to exit without change."
+"j/k or Up/Down to move, Enter to select, q to cancel"
 
 @set_highlight
 */
@@ -3816,14 +4769,14 @@ Our X macro handles the "normal" config fields, but then we call another functio
 
 void save_conf() {
     span original_cmp_end = {cmp.end, cmp.end};
-    void *p = out2cmp();
+    out_sav sav = out2cmp();
 
     #define X(name) prt(#name ": %.*s\n", len(state->name), state->name.buf);
     CONFIG_FIELDS
     #undef X
 
     save_conf_files();
-    out_rst(p);
+    out_rst(sav);
     original_cmp_end.end = cmp.end;
 
     write_to_file_span(original_cmp_end, state->config_file_path, 1);
@@ -3866,28 +4819,27 @@ All of these are under state->cmprdir:
 revs/
 tmp/
 api_calls/
+cache/
+cache/v8/
+cache/v8/revs/
 
 */
 
 void check_dirs() {
-    char buf[1024];
-    const char *dirs[] = {"revs/", "tmp/", "api_calls/"};
-    int n = sizeof(dirs) / sizeof(char*);
+    span dirs[] = {
+        S("revs/"), 
+        S("tmp/"), 
+        S("api_calls/"), 
+        S("cache/"), 
+        S("cache/v8/"), 
+        S("cache/v8/revs/")
+    };
+    
+    char buffer[1024];
 
-    for (int i = 0; i < n; i++) {
-        s_buffer(buf, 1024, state->cmprdir);
-        int l = len(state->cmprdir);
-        if (buf[l - 1] != '/') {
-            buf[l] = '/';
-            l++;
-        }
-        s_buffer(buf + l, 1024 - l, S((char *)dirs[i]));
-        
-        if (mkdir(buf, 0777) && errno != EEXIST) {
-            prt("Failed to create directory %s\n", buf);
-            flush();
-            exit(EXIT_FAILURE);
-        }
+    for (int i = 0; i < sizeof(dirs) / sizeof(dirs[0]); i++) {
+        snprintf(buffer, sizeof(buffer), "%.*s/%.*s", len(state->cmprdir), state->cmprdir.buf, len(dirs[i]), dirs[i].buf);
+        mkdir(buffer, 0777);
     }
 }
 
@@ -4722,7 +5674,6 @@ The following transforms are defined, and implemented by the following functions
 - code: block_code_part
 - all: (identity transform)
 
-*/
 
 span block_transforms(span block, span fn) {
     if (span_eq(fn, S("comment"))) {
@@ -4740,6 +5691,7 @@ span block_transforms(span block, span fn) {
     }
 }
 
+*/
 /* #print_block #print_comment #print_code #count_blocks
 
 In these print_* implementations we print block contents completely or partially.
@@ -4797,37 +5749,24 @@ int find_block(span search_text) {
 
 /* #block_by_id
 
-This is also similar to the search implementation.
+int block_by_id(span id_no_hash);
 
 We are given a block id, without the hash.
 
-We store cmp.end in a variable so we can reset it later.
+We compare with the block_idx to find the first id that is a match, disregarding the first char of the index element, as those do contain the '#'.
 
-We use prs to make a string with the "#" followed by the given id.
-
-We use find_block to find the first occurrence of that string in a block.
-
-We then reset cmp.end, and return either the block, or the null span if not found.
-
-span block_by_id(span id) {
-    u8* old_cmp_end = cmp.end;
-    span search_id = prs("#%.*s", len(id), id.buf);
-    int block_index = find_block(search_id);
-    cmp.end = old_cmp_end;
-    if (block_index >= 0) {
-        return state->blocks.a[block_index];
-    }
-    return nullspan();
-}
-
+Then we tail-call block_for_span.
 */
 
-int block_by_id(span id) {
-    u8* old_cmp_end = cmp.end;
-    span search_id = prs("#%.*s", len(id), id.buf);
-    int block_index = find_block(search_id);
-    cmp.end = old_cmp_end;
-    return block_index;
+int block_by_id(span id_no_hash) {
+    for (int i = 0; i < state->block_idx.n; ++i) {
+        span idx = state->block_idx.a[i];
+        advance1(&idx);
+        if (span_eq(id_no_hash, idx)) {
+            return block_for_span(state->block_idx.a[i]);
+        }
+    }
+    return -1;
 }
 
 /* #comment_to_prompt @langtable
@@ -4852,54 +5791,36 @@ The above elements are given in #langtable above as Col. 6.
 We use language_for_block to get the language appropriate to the block (actually the comment part) that is passed in.
 
 However, sometimes the context block is empty, or contains only whitespace.
-If the trim() of the context block is empty, we use an alternate shorter pattern, which is in #langtable col. 6b.
+So, instead of the output described above, if the trim() of the context block is empty, we use an alternate shorter pattern, which is in #langtable col. 6b.
 
 We finally get the new end of cmp and make that the end of our return span so that we return everything written into the cmp space.
 */
 
 span comment_to_prompt(span comment) {
-    void* old_out = out2cmp();
-
-    span context = expand_refs_2(comment, S("context"));
-    span body = expand_refs_2(comment, S("body"));
-
     span ret;
-    ret.buf = cmp.end;
-
+    span context, body;
     span lang = language_for_block(comment);
 
-    if (span_eq(lang, S("C"))) {
-        prt("```c\n");
-        if (!empty(trim(context))) {
-            wrs(context);
-            prt("```\n\n(above: references)\n----\n(below: current task)\n\n```c\n");
-        }
+    context = expand_refs_2(comment, S("context"));
+    body = expand_refs_2(comment, S("body"));
+
+    out_sav sav = out2cmp();
+    ret.buf = cmp.end;
+
+    if (empty(trim(context))) {
+        prt("```%.*s\n", len(lang), lang.buf);
         wrs(body);
         prt("```\n\nWrite the code. Reply only with code. Do not include comments.\n");
-    } else if (span_eq(lang, S("Python"))) {
-        prt("```python\n");
-        if (!empty(trim(context))) {
-            wrs(context);
-            prt("```\n\n(above: reference)\n----\n(below: current work)\n\n```python\n");
-        }
-        wrs(body);
-        prt("```\n\nWrite the code. Reply only with code. Avoid code_interpreter.\n");
-    } else if (span_eq(lang, S("JavaScript"))) {
-        prt("```js\n");
-        if (!empty(trim(context))) {
-            wrs(context);
-            prt("```\n\n(above: reference)\n----\n(below: current work)\n\n```js\n");
-        }
-        wrs(body);
-        prt("```\n\nWrite the code. Reply only with code. Do not include comments.\n");
-    } else if (span_eq(lang, S("Markdown"))) {
+    } else {
+        prt("```%.*s\n", len(lang), lang.buf);
         wrs(context);
+        prt("```\n\n(above: references)\n----\n(below: current task)\n\n```%.*s\n", len(lang), lang.buf);
         wrs(body);
+        prt("```\n\nWrite the code only for the current task. Reply only with code. Do not include comments.\n");
     }
 
     ret.end = cmp.end;
-    out_rst(old_out);
-
+    out_rst(sav);
     return ret;
 }
 
@@ -5025,7 +5946,6 @@ We call prt_cmp and spans_arena_push.
 Then we call expand_refs_rec for the recursive part (which will output the expanded block into cmp space using prt).
 Finally we call prt_pop and spans_arena_pop.
 We update our ret span's .end to the current cmp.end, and return it.
-*/
 
 span expand_refs(span references) {
     span ret = {.buf = cmp.end, .end = cmp.end};
@@ -5038,6 +5958,7 @@ span expand_refs(span references) {
     return ret;
 }
 
+*/
 /* #expand_refs_rec
 
 Here we get the comment part of a block, which may contain two kinds of references, which we will expand and print.
@@ -5084,7 +6005,6 @@ If chase_ref returns an empty span, then again we print the line unmodified, fol
 Here, we do not print a newline after, as the recursive block will already end with one, and if further newlines are needed, they can be added around the references by the user.
 
 For lines not starting with "@", we also simply print them as-is, followed by newline.
-*/
 
 void expand_refs_rec(span block, int depth) {
     span line = next_line(&block);
@@ -5136,14 +6056,15 @@ void expand_refs_rec(span block, int depth) {
     }
 }
 
+*/
 /* #out2cmp
 @- Pattern for redirecting output.
 @- Used to allow the convenient functions prt etc to be used when writing to cmp space.
-We use out2cmp to redirect output functions to cmp space, and store the void* which it returns.
-Later after our printing is all done and before returning, we must call out_rst and pass the pointer to it to reset the output to whatever it may have been before.
-@- (not necessarily out, it may have been cmp already, hence the pointer)
+We use out2cmp to redirect output functions to cmp space, and store the out_sav opaque type which it returns.
+Later after our printing is all done and before returning, we must call out_rst and pass the out_sav value.
+This will reset the output to whatever it may have been before.
+E.g. `out_sav sav = out2cmp(); ... do all printing ... ; out_rst(sav);`.
 */
-
 /* #blockref_id #blockref_fname
 
 These two helper functions parse parts out of a block reference.
@@ -5223,11 +6144,11 @@ span expand_refs_2(span refs, span mode) {
     ret.buf = cmp.end;
 
     spans_arena_push();
-    void* old_output = out2cmp();
-
+    out_sav saved_out_sav = out2cmp();
+    
     expand_refs_2_rec(refs, mode, 0, 0);
-
-    out_rst(old_output);
+    
+    out_rst(saved_out_sav);
     spans_arena_pop();
 
     ret.end = cmp.end;
@@ -5479,7 +6400,6 @@ We use block_by_id to get the block, and if there is no match, we return the nul
 
 Finally we tail call block_transforms with the block (from state) and the modifier function name, if any.
 The default modifier is "inner-comment", so if one was not provided, we use that.
-*/
 
 span chase_ref(span ref) {
     span ret = nullspan();
@@ -5498,6 +6418,7 @@ span chase_ref(span ref) {
     return block_transforms(block, mod);
 }
 
+*/
 /* #chase_ref_2 @sio
 
 span chase_ref_2(span);
@@ -5674,8 +6595,6 @@ This will contain a command like "xclip -o -selection clipboard" (our default) o
 Then we call pipe_cmd_cmp(span) and returns a span of piped in data from the clipboard, which we pass on to replace_block_code_part().
 */
 
-span pipe_cmd_cmp(span);
-
 void replace_code_clipboard() {
     ensure_conf_var(&state->cbpaste, S("Command to get text from the clipboard on your platform (Mac: pbpaste, Linux: try xclip -o -selection clipboard, Windows: ?)"), S("xclip -o -selection clipboard"));
     span new_content = pipe_cmd_cmp(state->cbpaste);
@@ -5683,6 +6602,8 @@ void replace_code_clipboard() {
 }
 
 /* #pipe_cmd_cmp()
+
+span pipe_cmd_cmp(span);
 
 We get a command (as a span) and we run it, sending the output into the complement of cmp in cmp_space.
 
@@ -5725,7 +6646,7 @@ Note: Do this every time, not the just the first time.
 
 Similar to handle_edited_file() above, we are given a span (instead of a file) and we must update the current block, moving data around in memory as necessary.
 
-We put the original block's span in a local variable for convenience.
+We put the original block's span in a local variable for convenience, as well as the file index for that block.
 
 The end result of inp should contain:
 - the contents of inp currently, up to the start (the .buf) of the original block.
@@ -5747,7 +6668,7 @@ We then must update the .end of the current file contents, and both the .buf and
 
 As before we then find the current locations of the blocks and handle all downstream tasks with ingest().
 
-Once all this is done, we call new_rev, passing a null span for the filename, since there's no filename here.
+Once all this is done, we call new_rev, passing a null span for the filename, since there's no filename here, and the file index.
 */
 
 void replace_block_code_part(span new_code) {
@@ -5799,6 +6720,40 @@ void replace_block_code_part(span new_code) {
     // Store a new revision, no filename required
     new_rev(nullspan(), file_index);
 }
+
+/* #replace_block @replace_block_code_part @currentblock
+
+void replace_block(span);
+
+This is the same as replace_block_code_part, above, except that instead of being given the code part of a block, we are given the entire contents of a block.
+So we simply ignore everything having to do with code parts or comment parts, and replace the entire block contents, then otherwise proceed as before.
+*/
+
+void replace_block(span new_block) {
+    span original_block = state->blocks.a[state->current_index];
+    int file_index = file_for_block(original_block);
+
+    size_t new_block_len = len(new_block);
+    size_t old_block_len = len(original_block);
+    size_t rest_len = state->files.a[file_index].contents.end - original_block.end;
+
+    if (new_block_len != old_block_len) {
+        memmove(original_block.buf + new_block_len, original_block.end, rest_len);
+    }
+
+    memcpy(original_block.buf, new_block.buf, new_block_len);
+
+    state->files.a[file_index].contents.end = original_block.buf + new_block_len + rest_len;
+
+    for (int i = file_index + 1; i < state->files.n; i++) {
+        state->files.a[i].contents.buf = state->files.a[i - 1].contents.end;
+        state->files.a[i].contents.end = state->files.a[i].contents.buf + len(state->files.a[i].contents);
+    }
+
+    ingest();
+    new_rev(nullspan(), file_index);
+}
+
 /* #cmpr_init
 
 We are called without args and set up some configuration and empty directories to prepare the CWD for use as a cmpr project.

@@ -12,7 +12,6 @@ file: conf
 file: cmpr.c
 file: spanio.c
 file: bootstrap.sh
-file: doc/second
 file: Makefile
 
 language: Markdown

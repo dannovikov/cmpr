@@ -7,7 +7,8 @@ You must flush() before the output will be printed to stdout and be visible to t
 A common cmpr pattern is prt, flush, getch.
 To "complain and exit" means prt, flush, exit(n>0).
 A span has a start pointer and an end pointer, called .buf and .end respectively.
-(A thran has three pointers and can be addressed as two spans which share an endpoint; just an idea at this point.)
+A thran has three pointers and can be addressed as two spans which share an endpoint; it is naturally used internally for things like buffers, pipes, and in general anywhere where information is being consumed linearly (usually left-to-right, i.e. ascending addresses in memory, but could be in reverse), for example in parsing.
+You can think of it as a span with a progress bar.
 
 - empty(span): If a span is empty (start and end pointers are equal).
 - len(span): The length of a span. Prefer this over less clear .end minus .buf.
@@ -19,20 +20,22 @@ A span has a start pointer and an end pointer, called .buf and .end respectively
 - bksp(): Backspace, shortens the output span by one.
 - sp(): Appends a space character to the output span, i.e. prints a space.
 - terpri(): Prints a newline (name courtesy Common Lisp).
-- void* out2cmp(), out_rst(void*): redirect all output functions to cmp (instead of out) and then undo (reset)
+- out_sav out2cmp(), out_rst(out_sav): redirect all output functions to cmp (instead of out) and then undo (reset) back to given opaque state reprentation.
 - flush(), flush_err(): Flushes the output span to standard output or standard error.
+@- flush_atp(span): Flush the output span by appending to a given path.
 - write_to_file_span(span content, span path, int clobber): Write a span to a file, optionally overwriting.
 - write_to_file(span, const char*): Deprecated.
+- readable_file(span): whether a file exists as a regular file readable by us.
 - read_file_into_span(char*, span): Reads the contents of a file into a span. Deprecated.
 - read_file_S_into_span(span, span): Read the contents of a file $1 into a span $2. Used in new code. Returns a span prefix of $2.
 - read_file_into_cmp(span): Filename as a span, returns contents as a span inside cmp space.
 - read_file_into_inp(span): Filename as a span, returns contents as a span inside inp space.
 - advance1(span*), advance(span*, int): Advances the start pointer of a span by one or a specified number of characters.
 - shorten1(span*), shorten(span*, int): Shortens a span by one or by a given number of characters.
-- find_char(span, char): Searches for a character in a span and returns its first index or -1.
-- contains(span, span): Checks if one span TEXTUALLY contains another; abc b O(n) string search.
-- contains_ptr(span, span): Checks if one span PHYSICALLY contains another; [[]] O(1) pointer comparisons.
-- starts_with(span, span): Check if $2 is textual prefix of $1 (or equal) (mnemonic: a "starts with" b).
+- find_char(span, char): Searches for a character in a span and returns its first index or -1; find_char_rev(span,char) finds the last index or -1.
+- contains(span, span): Checks if one span TEXTUALLY contains another; "abc b"; O(n) string search.
+- contains_ptr(span, span): Checks if one span PHYSICALLY contains another; "[[]]"; O(1) pointer comparisons.
+- starts_with(span, span): Check if $2 is textual prefix of (or equal to) $1 (mnemonic for arg order: $1 starts-with $2).
 - ends_with(span, span): Check if $1 ends with $2.
 - consume_prefix(span, span*): Shortens a span by a prefix if present, returning that prefix or nullspan().
 - first_n(span, int): Returns n leading chars of a span.
@@ -58,6 +61,13 @@ A span has a start pointer and an end pointer, called .buf and .end respectively
 - concat(span,span): Returns a new span (in cmp space) containing a concatenation.
 
 typedef struct { u8* buf; u8* end; } span; // the type of span
+
+typedef struct { u8* buf; u8* end; u8* p; } thran; // a thran holds buf and end but also .p (pointer (or progress))
+
+- thran_of(span): the pointer always refers to some location in between buf and end, here it will be set equal to buf.
+- thran_a(thran): returns the "a" part of a thran, i.e. the part up to the pointer (e.g. empty(thran_a(thran_of(x))) for any x).
+- thran_b(thran): returns the "b" part, after the pointer, (span_eq (thran_b (thran_of x)) x) is true for any span x.
+- thran_full(thran): the dual of thran_of, returns both parts of the thran as a span (discarding the .p information).
 
 We have a generic array implementation using arena allocation.
 
@@ -189,26 +199,30 @@ typedef unsigned char u8;
 
 /* #span
 
-Our string type.
+Basic types and function declarations.
 
 A span is two pointers.
 Buf points to the first char included in the string.
 End points to the first char excluded after the string's end.
 
-If these two pointers are equal, the string is empty, but it still points to a location.
-
-So two empty spans are not necessarily the same span, while two empty strings are.
-Neither spans nor their contents are immutable, but everything depends on intended use.
-
 These two pointers must point into some space that has been allocated somewhere.
 
+If these two pointers are equal, the string is empty, but it still points to a location.
+(So two empty spans are not necessarily the same span, while two empty strings are.)
+
+Neither spans nor their contents are immutable; everything depends on intended use.
+
+Spans frequently point into one of three large buffers, namely inp, out, and cmp.
+
 The inp variable is the span which writes into input_space, and then is the immutable copy of stdin for the duration of the process.
+This input may come from stdin or from the filesystem or network, etc.
 The number of bytes of input is len(inp).
 The output is stored in span out, which points to output_space.
-Input processing is generally by reading out of the inp span or subspans of it.
+Input processing is generally by reading or parsing inp or subspans of inp.
 The output spans are mostly written to with prt() and other IO functions.
-The cmp_space and cmp span which points to it are used for analysis and model data, both reading and writing.
-These are just the common conventions; your program may use them differently.
+The cmp_space and cmp span which points to it are used for model data.
+This includes reading and writing data that is synthesized during the program runtime.
+These are just the common conventions; your program may use inp, out, and cmp differently.
 
 When writing output, we often see prt followed by flush.
 Flush sends to stdout the contents of out (the output span) that have not already been sent.
@@ -227,6 +241,12 @@ typedef struct {
   u8 *end;
 } span;
 
+typedef struct {
+  u8 *buf;
+  u8 *end;
+  u8 *p;
+} thran;
+
 #define BUF_SZ (1 << 30)
 
 u8 *input_space; // remains immutable once stdin has been read up to EOF.
@@ -242,6 +262,10 @@ void init_spans(); // main spanio init function
 
 // basic spanio primitives
 
+typedef struct {
+  span* outp;
+} out_sav;
+
 void prt(const char *, ...);
 void w_char(char);
 void wrs(span);
@@ -253,23 +277,20 @@ void w_char_esc_pad(char);
 void w_char_esc_dq(char);
 void w_char_esc_sq(char);
 void wrs_esc(span);
-void* out2cmp(); // redirect all output functions (prt, wrs, etc) to cmp instead of out
-void out_rst(void*); // undo effect of out2cmp
+out_sav out2cmp();     // redirect all output functions (prt, wrs, etc) to cmp instead of out
+//out_sav out2atp(span); // redirect to append to a file (creating paths and files if needed)
+void out_rst(out_sav); // undo effect of out2cmp or out2atp
 void flush();
+//void discard(); // experimental, probably going away
 void flush_err();
 void write_to_file(span content, const char* filename);
+int readable_file(span);
 span read_file_into_span(char *filename, span buffer);
 span read_file_S_into_span(span filename, span buffer);
 span read_file_into_cmp(span filename);
-//void redir(span);
-//span reset();
-//void save();
-//void push(span);
-//void pop(span*);
 void advance1(span*);
 void advance(span*,int);
-//span pop_into_span();
-int find_char(span s, char c);
+int find_char(span s, char c); int find_char_rev(span s, char c);
 int contains(span, span);
 span take_n(int, span*);
 span next_line(span*);
@@ -279,34 +300,21 @@ int span_cmp(span, span);
 span S(char*);
 span nullspan();
 
- /*
-typedef struct {
-  span *s; // array of spans (points into span arena)
-  int n;   // length of array
-} spans;
-
-#define SPAN_ARENA_STACK 256
-
-span* span_arena;
-int span_arenasz;
-int span_arena_used;
-int span_arena_stack[SPAN_ARENA_STACK];
-int span_arena_stack_n;
-
-void span_arena_alloc(int);
-void span_arena_free();
-void span_arena_push();
-void span_arena_pop();
-*/
-
 span inp_compl();
 span cmp_compl();
 span out_compl();
-/* input statistics on raw bytes; span basics */
+/* #spanio_basics
+
+input statistics on raw bytes; span basics
+
+This hand-written C code implements most of our span I/O basics.
+If we can get an LLM to match this style it's a good result.
+
+*/
 
 int counts[256] = {0};
 
-void read_and_count_stdin(); // populate inp and counts[]
+//void read_and_count_stdin(); // populate inp and counts[]
 int empty(span s) {
   return s.end == s.buf;
 }
@@ -314,7 +322,13 @@ int empty(span s) {
 
 inline int len(span s) { return s.end - s.buf; }
 
-u8 in(span s, u8* p) { return s.buf <= p && p < s.end; }
+//u8 in(span s, u8* p) { return s.buf <= p && p < s.end; } // still used?
+
+thran thran_of(span s) { return (thran){ s.buf, s.end, s.buf }; }
+span thran_a(thran t) { return (span){t.buf, t.p}; }
+span thran_b(thran t) { return (span){t.p, t.end}; }
+span thran_full(thran t) { return (span) {t.buf, t.end}; }
+//void thran_adv(thran *t, int n) { t.p += n; }
 
 int out_WRITTEN = 0, cmp_WRITTEN = 0;
 
@@ -329,13 +343,12 @@ void init_spans() {
   cmp.buf = cmp_space;
   cmp.end = cmp_space;
   outp = &out;
+  //flush_target = stdout;
 }
 
 void bksp() { (*outp).end--; }
 
 void sp() { w_char(' '); }
-
-// we might have the same kind of redir_i() as we have redir() already, where we redirect input to come from a span and then use standard functions like take() and get rid of these special cases for taking input from streams or spans.
 
 span head_n(int n, span *io) {
   span ret;
@@ -376,7 +389,7 @@ char* s_buffer(char* buf, int n, span s) {
 char* s(span s) {
   if (len(s) && s.end[-1] == '\0') return (char*)s.buf;
   char* ret = (char*)cmp.end;
-  void* o = out2cmp();
+  out_sav o = out2cmp();
   wrs(s);
   w_char('\0');
   out_rst(o);
@@ -397,7 +410,7 @@ void read_and_count_stdin() {
   inp.buf = input_space;
 }
 
-/*
+ /*
 span saved_out[16] = {0};
 int saved_out_stack = 0;
 
@@ -430,8 +443,133 @@ const int ALWAYS_FLUSH = 0;
 //void prt_cmp() { assert(prt_cmp_stack_n < 1023); prt_cmp_stack[prt_cmp_stack_n++] = out; out = cmp; }
 //void prt_pop() { assert(0 < prt_cmp_stack_n); out = prt_cmp_stack[--prt_cmp_stack_n]; }
 
-void* out2cmp() { void* ret = outp; outp = &cmp; return ret; }
-void out_rst(void* op) { outp = (span*) op; }
+/* C convenience methods
+
+We have a "copy" already here (somewhere else currently).
+
+We add mkdir_p and pathpart just to simplify out2atp.
+
+*/
+
+/* #mkdir_p
+
+void mkdir_p(span dir) {
+  // find the first occurrence, if any, of the char "/", which ends the leading path component of dir
+  // if there is no such occurrence, we are done, return
+  // use chdir(2) to change the cwd
+  // if this doesn't work because the directory does not exist, then create it (and then cd into it after all)
+  // continue to loop over the remaining part of the span after the "/"
+  // finally we return to the directory which we were originally in (which we must have saved earlier in `old_cwd` using getcwd and a PATH_MAX-sized buffer).
+}
+
+First we store the u8* cmp.end, so we don't leak cmp space.
+On the last line of the function (or before any early return) we must remember to reset cmp.end = end.
+@- probably we should have a very unsafe s() version that re-uses a single static buffer, since this is library stuff it's ok if it's hard to use
+
+If any of our system calls fails, we will immediately print any filename argument (using prt, flush_err) and then print the OS error message using perror("mkdir_p") and finally exit(1).
+*/
+
+void mkdir_p(span dir) {
+    u8* end = cmp.end;
+    fprintf(stderr, "%p", end);
+    char old_cwd[PATH_MAX];
+    if (getcwd(old_cwd, sizeof(old_cwd)) == NULL) {
+        prt("Failed to get current working directory");
+        flush_err();
+        perror("mkdir_p");
+        exit(1);
+    }
+    span remaining = dir;
+    while (!empty(remaining)) {
+        int idx = find_char(remaining, '/');
+        if (idx == -1) break;
+        span component = take_n(idx, &remaining);
+        advance1(&remaining); // skip the "/"
+        char path[PATH_MAX];
+        s_buffer(path, PATH_MAX, component);
+        if (chdir(path) != 0) {
+            if (mkdir(path, 0755) != 0 || chdir(path) != 0) {
+                prt("%.*s", len(component), component.buf);
+                flush_err();
+                perror("mkdir_p");
+                exit(1);
+            }
+        }
+    }
+    if (chdir(old_cwd) != 0) {
+        prt("Failed to return to directory: %s", old_cwd);
+        flush_err();
+        perror("mkdir_p");
+        exit(1);
+    }
+    cmp.end = end;
+    fprintf(stderr, "%p", cmp.end);
+}
+
+/* #pathpart
+
+This is just a convenience method getting the longest known-path component of a span.
+
+This is simply the prefix of dir that ends with the last slash it contains.
+
+span pathpart(span dir) {
+  // find the last slash in dir
+  // if none, return the empty span located at dir.buf
+  // return a span starting from dir.buf and ending with the slash offset plus one (so that it is included)
+}
+
+(Note that this function always returns a subspan of dir, and only a null span if dir is the null span.)
+*/
+
+span pathpart(span dir) {
+    int last_slash = find_char_rev(dir, '/');
+    if (last_slash == -1) {
+        return (span){ .buf = dir.buf, .end = dir.buf };
+    }
+    return (span){ .buf = dir.buf, .end = dir.buf + last_slash + 1 };
+}
+
+/* spanio basics
+*/
+
+out_sav out2cmp() { out_sav ret = {0}; ret.outp = outp; outp = &cmp; return ret; }
+//out_sav out2atp(span p) { out_sav ret = {0}; ret.outp = outp; outp = &cmp; mkdir_p(pathpart(p)); char buffer[4096]; s_buffer(buffer, 4096, pathpart(p)); ret.fcls = open(buffer, O_WRONLY | O_CREAT | O_APPEND); return ret; }
+//void out_rst(out_sav sav) { outp = sav.outp; /*if (sav.fcls) close(sav.fcls);*/ if (sav.prev_target) flush_target = sav.prev_target; }
+
+ /*
+out_sav out2atp(span p) {
+  out_sav ret = {0};
+  ret.outp = outp;
+  outp = &cmp;
+  //fprintf(stderr,"before: %p\n",cmp.end);
+  mkdir_p(pathpart(p));
+  //fprintf(stderr,"after: %p\n",cmp.end);
+  char buffer[4096];
+  s_buffer(buffer, 4096, p);
+  int fd = open(buffer, O_WRONLY | O_CREAT | O_APPEND, 0644);
+  if (fd < 0) {
+    perror("out2atp");
+    exit(1);
+  }
+  ret.prev_target = flush_target;
+  flush_target = fdopen(fd, "a");
+  if (!flush_target) {
+    perror("out2atp");
+    exit(1);
+  }
+  return ret;
+}
+*/
+
+void out_rst(out_sav sav) {
+  //flush();
+  outp = sav.outp;
+  //if (sav.fcls) close(sav.fcls);
+  //if (sav.prev_target) {
+    //fclose(flush_target);
+    //flush_target = sav.prev_target;
+  //}
+}
 
 void prt(const char * fmt, ...) {
   va_list ap;
@@ -536,15 +674,21 @@ void wrs_esc(span s) {
 void flush() {
   int *WRITTEN = (output_space < outp->end && outp->end < output_space + BUF_SZ) ? &out_WRITTEN : &cmp_WRITTEN;
   if (*WRITTEN < len(*outp)) {
-    printf("%.*s", len(*outp) - *WRITTEN, outp->buf + *WRITTEN);
+    //fprintf(flush_target,"%.*s", len(*outp) - *WRITTEN, outp->buf + *WRITTEN);
+    fwrite(outp->buf + *WRITTEN, 1, len(*outp) - *WRITTEN, stdout);
     *WRITTEN = len(*outp);
     fflush(stdout);
   }
 }
 
+void discard() {
+  int *WRITTEN = (output_space < outp->end && outp->end < output_space + BUF_SZ) ? &out_WRITTEN : &cmp_WRITTEN;
+  *WRITTEN = len(*outp);
+}
+
 void flush_err() {
   int *WRITTEN = (output_space < outp->end && outp->end < output_space + BUF_SZ) ? &out_WRITTEN : &cmp_WRITTEN;
-  if (*WRITTEN < len(out)) {
+  if (*WRITTEN < len(*outp)) {
     fprintf(stderr, "%.*s", len(*outp) - *WRITTEN, outp->buf + *WRITTEN);
     *WRITTEN = len(*outp);
     fflush(stderr);
@@ -606,18 +750,31 @@ void write_to_file_span(span content, span filename_span, int clobber) {
   write_to_file_2(content, filename, clobber);
 }
 
-// Function to print error messages and exit (never write "const" in C)
-void exit_with_error(char *error_message) {
-  perror(error_message);
-  exit(EXIT_FAILURE);
-}
-
-/* not really any better for usability I think
+ /* not really any better for usability I think
 span read_f_into_span(span filename, span* buffer) {
   span ret = read_file_S_into_span(filename, *buffer);
   buffer->buf = ret.end;
 }
 */
+
+ /* #readable_file @s_buffer
+
+int readable_file(span path);
+
+We use s_buffer pattern with PATH_MAX and do a stat.
+
+If the file doesn't exist, isn't a normal file, or isn't readable by us we return 0, otherwise 1.
+*/
+
+int readable_file(span path) {
+    char buffer[PATH_MAX];
+    s_buffer(buffer, PATH_MAX, path);
+    struct stat sb;
+    if (stat(buffer, &sb) != 0) return 0;
+    if (!S_ISREG(sb.st_mode)) return 0;
+    if (access(buffer, R_OK) != 0) return 0;
+    return 1;
+}
 
 span read_file_into_cmp(span filename) {
   span ret = read_file_S_into_span(filename, cmp_compl());
@@ -636,7 +793,7 @@ span read_file_into_span(char* filename, span buffer) {
   int fd = open(filename, O_RDONLY);
   if (fd == -1) {
     prt("Failed to open %s\n", filename);
-    flush();
+    flush_err();
     exit(1);
   }
 
@@ -645,26 +802,29 @@ span read_file_into_span(char* filename, span buffer) {
   if (fstat(fd, &statbuf) == -1) {
     close(fd);
     prt("Failed to get file size for %s\n", filename);
-    flush();exit(1);
+    flush_err();exit(1);
   }
 
   // Check if the file's size fits into the provided buffer
   size_t file_size = statbuf.st_size;
   if (file_size > len(buffer)) {
     close(fd);
-    exit_with_error("File content does not fit into the provided buffer");
+    prt("File content for %s does not fit into the provided buffer\n", filename);
+    flush_err();exit(1);
   }
 
   // Read file contents into the buffer
   ssize_t bytes_read = read(fd, buffer.buf, file_size);
   if (bytes_read == -1) {
     close(fd);
-    exit_with_error("Failed to read file contents");
+    prt("Failed to read file contents for %s\n", filename);
+    flush_err();exit(1);
   }
 
   // Close the file
   if (close(fd) == -1) {
-    exit_with_error("Failed to close file");
+    prt("Failed to close file %s\n", filename);
+    flush_err();exit(1);
   }
 
   // Create and return a new span that reflects the read content
@@ -672,7 +832,7 @@ span read_file_into_span(char* filename, span buffer) {
   return new_span;
 }
 
-/*
+ /*
 u8 *save_stack[16] = {0};
 int save_count = 0;
 
@@ -777,6 +937,13 @@ int find_char(span s, char c) {
   return -1; // Character not found
 }
 
+int find_char_rev(span s, char c) {
+  for (int i = len(s); i; --i) {
+    if (s.buf[i-1] == c) return i-1;
+  }
+  return -1;
+}
+
 span trim(span s) {
   while (len(s) && isspace((unsigned char)*s.buf)) s.buf++;
   while (len(s) && isspace((unsigned char)*(s.end - 1))) s.end--;
@@ -785,7 +952,7 @@ span trim(span s) {
 
 span concat(span a, span b) {
   span ret = {cmp.end};
-  void* o = out2cmp();
+  out_sav o = out2cmp();
   wrs(a);
   wrs(b);
   out_rst(o);
@@ -833,12 +1000,12 @@ span consume_prefix(span prefix, span *input) {
   return ret;
 }
 /*
-The spans arena implementation.
+The old spans arena implementation.
 */
 
 //spans spans_alloc(int n);
 
-/*void span_arena_alloc(int sz) {
+ /*void span_arena_alloc(int sz) {
   span_arena = malloc(sz * sizeof *span_arena);
   span_arenasz = sz;
   span_arena_used = 0;
@@ -1082,7 +1249,7 @@ json json_parse_prefix_littok(span*);
 int json_is_null(json j) { return !j.s.buf; }
 
 json json_s(span s) {
-  void* out = out2cmp();
+  out_sav out = out2cmp();
   json ret = {0};
   ret.s.buf = cmp.end;
   prt("\"");
@@ -1119,7 +1286,7 @@ json json_s(span s) {
 }
 
 json json_n(double n) {
-  void *rst = out2cmp();
+  out_sav rst = out2cmp();
   json ret = {.s = {.buf = cmp.end }};
   prt("%F", n);
   ret.s.end = cmp.end;
@@ -1128,7 +1295,7 @@ json json_n(double n) {
 }
 
 json json_b(int b) {
-  void *rst = out2cmp();
+  out_sav rst = out2cmp();
   json ret = {.s = {.buf = cmp.end }};
   if (b) prt("true"); else prt("false");
   ret.s.end = cmp.end;
@@ -1137,7 +1304,7 @@ json json_b(int b) {
 }
 
 json json_0() {
-  void *rst = out2cmp();
+  out_sav rst = out2cmp();
   json ret = {.s = {.buf = cmp.end }};
   prt("null");
   ret.s.end = cmp.end;
@@ -1146,7 +1313,7 @@ json json_0() {
 }
 
 json json_o() {
-  void *rst = out2cmp();
+  out_sav rst = out2cmp();
   json ret = {.s = {.buf = cmp.end }};
   prt("{}");
   ret.s.end = cmp.end;
@@ -1155,7 +1322,7 @@ json json_o() {
 }
 
 void json_o_extend(json *j, span key, json val) {
-  void *rst = out2cmp();
+  out_sav rst = out2cmp();
   u8* keybuf = malloc(len(key));
   u8* valbuf = malloc(len(val.s));
   memcpy(keybuf, key.buf, len(key));
@@ -1177,7 +1344,7 @@ void json_o_extend(json *j, span key, json val) {
 }
 
 json json_a() {
-  void *rst = out2cmp();
+  out_sav rst = out2cmp();
   json ret = {.s = {.buf = cmp.end }};
   prt("[]");
   ret.s.end = cmp.end;
@@ -1186,7 +1353,7 @@ json json_a() {
 }
 
 void json_a_extend(json *a, json val) {
-  void *rst = out2cmp();
+  out_sav rst = out2cmp();
   cmp.end = a->s.end;
   bksp();
   if (*(cmp.end - 1) != '[') prt(",");

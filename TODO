@@ -133,59 +133,23 @@
   ✓ add "#" feature
   ✓ turn off bootstrap on startup
   ✓ make .n start at 0
+  ✓ checksum for block content in memory and on disk
+      ✓ pick a placeholder or simple approach: SipHash?
+      ✓ get something to compile
+      ✓ checksum blocks
+      ✓ checksum files, blocks, lines in all revs
+  ✓ fix the first-line thing on @id:code
+  ✓ replace spans arena with generic implementation
+  ✓ make "#" jump to block by id (as a menu)
 
 
 
 
 WHAT WE ARE CURRENTLY DOING:
-  → basic diff features
-    → add "U" with a listing, most-recent first
-      ✓ checksum and index blocks
-        ✓ design how it will work
-        ✓ implement checksums for blocks, lines, files (in #checksum_code)
-        ✓ implement checksums for each rev
-      ✓ implement "find previous version of block"
-        support j/k, q, Enter
-        render timestamps
-        optimization (caching?)
-        deal with non-adjacent duplication
-
-        global context block
-    update ? short help
-
-    "Error: Block does not belong to any file." happened
-      context: added a space before a "#" in the last markdown block in the last file, then :wq
-    Arena overflow for spans
-    chmod issue on Windows (exec bit)
-    actually index block ids
-    make "#" jump to block by id (or maybe a menu!)
-    make "@" be a menu of references from this block
-    "@@" or sth is menu of blocks that refer to us
-    automatically suggest regen of stale downstream blocks
-    prt_exit() is probably actually a good idea
-    explore "prompt palette" idea
-    fix the first-line thing on @id:code
-    replace spans arena with generic implementation
-    keep ollama model loaded
-    make LLM calls asynchronous
-    clipboard model set automatically
-    rename bootstrap to genesis(?) projblock(?) global context block
-    add :allfiles to autopopulate conf, and an empty state
-    cmprdir should be auto-set
-    ~/.cmpr for top-level conf
-    send everything to LLM and create a bootstrap? ctags?
-    ship with some kind of bootstrap bootstrap?
-    jumping between files not just blocks
-    idea: maybe go from spec to list of callable functions, approve this, then implementation; allows injecting library call documentation
-    idea: (maybe optionally) put the cmp highwater in the ruler and then start unleaking span allocations
-  → feature: checksum for block content in memory and on disk
-      ✓ pick a placeholder or simple approach: SipHash?
-      ✓ get something to compile
-      ✓ checksum blocks
-      → checksum files, blocks, lines in all revs
 
 
-  → dataloss pass: think through everything; addresses control issue  4 4 16
+  → dataloss pass: think through everything; addresses control issue
+    → visibility into what's happening with process control; be chatty around tmp files
     = user visibility into what's in the files and when it got there
     = "diffs and dates"
     Q: if GPT writes the code, how can we trust it?
@@ -193,10 +157,42 @@ WHAT WE ARE CURRENTLY DOING:
     Another more specific answer is as follows: we structure the problem in such a way that there is either a solution or there is no side effect.
     This is the principle of least privilege and it means you can delegate authority, for example, to a postscript program and trust that it will not access the network.
 
+    update ? short help
+    merge 2 PRs
+    dedup transitive block references
+    Arena overflow for spans
+    chmod issue on Windows (exec bit)
+    bump version and push v8
+
+    I think flush should probably never apply to cmp, only out
+    rename bootstrap to global context block
+    "Error: Block does not belong to any file." happened
+      context: added a space before a "#" in the last markdown block in the last file, then :wq
+    actually index block ids
+    make "@" be a menu of references from this block
+    "@@" or sth is menu of blocks that refer to us
+    automatically suggest regen of stale downstream blocks
+    prt_exit() is probably actually a good idea
+    explore "prompt palette" idea
+    keep ollama model loaded
+    make LLM calls asynchronous
+    clipboard model set automatically
+    add :allfiles to autopopulate conf, and an empty state (?)
+    cmprdir should be auto-set
+    ~/.cmpr for top-level conf
+    send everything to LLM and create a bootstrap? ctags?
+    ship with some kind of bootstrap bootstrap?
+    jumping between files not just blocks
+    idea: maybe go from spec to list of callable functions, approve this, then implementation; allows injecting library call documentation
+    idea: (maybe optionally) put the cmp highwater in the ruler and then start unleaking span allocs
+
+
 
 
     QA on --init and setting language
-    make cmprdir be optional, defaulting to .cmpr/
+    turn a template into a shell script with cmpr calls embedded
+    idea: cmpr --expand takes a template on stdin and returns text on stdout (or --eval) (it makes cmpr a database)
+    cmprdir should default to .cmpr/
     test / fix check_conf_vars (e.g. cmprdir missing)
     support other AIs via an external script
     idea: when a TODO item is done, put the relevant blocks in a comment
@@ -205,7 +201,6 @@ WHAT WE ARE CURRENTLY DOING:
     first steps on the road total rev awareness 4 4 16
     basic summarize feature (at least vjjjjj should give you something maximizing cols*5 chars worth)
     bring compiler errors into the workflow (line no -> block, etc) 3 3 9
-    try more with VSCode support  4 2 8
     add translations into ~every language 4 2 8
     add 'd', 'p', 'P' so that moving around blocks is easy  4 2 8
     add o / O for block insertions  3 2 6
@@ -228,29 +223,12 @@ WHAT WE ARE CURRENTLY DOING:
 
 
 
-Current TODO:
-
-Product
-Benefit: 1-4
-Difficulty: 1-4
-
-    Adv  Ben  Diff
-    ---  ---  ----
-    16   4    4    dataloss pass: think through everything; addresses control issue
-         -    -    data loss when two cmprs open (related to rev currency check)
-     4   4    1    support markdown or HTML
-     8   4    2    handle deleted (or not-yet-created) files sensibly
-                   add :tests
-                     tests: --init, main loop (j/k/g/G), find and print block features, Python support, [...]
+    data loss when two cmprs open (related to rev currency check)
+    support markdown or HTML "views"
+    handle deleted (or not-yet-created) files sensibly
     unified diff stuff
       try getting GPT4 to suggest changes to the comment part
     bug: (mkdir pytest; cd pytest; cmpr --init; cmpr # use Python language with .cmpr/conf)
-    add markdown support
-    put something in the README about coexistence with SCMs/git
-    just create revdir and tmpdir if they don't exist
-    example blocks should be in the README (maybe the arg parsing one)
-    *** soft launch ***
-    try more with VSCode support
     librification / cleanup
     "total rev awareness"
       start with bpe(?)
@@ -274,7 +252,6 @@ Difficulty: 1-4
     add translations into ~every language
     publish training data?
       as separate repo
-    asking for tmpdir and revdir is dumb now that we have --init; just default them
     settings mode works by opening the conf file in a buffer and syntax checking it after (visudo style)
     to "file:" we add "collection:" (library, folder, ...) which is exactly the same but adds a "dir"
       (By "dir" we mean a level of hierarchy in the UI that's closed by default.)
@@ -286,15 +263,12 @@ Difficulty: 1-4
       only on block changes for efficiency / over all code by special command
     think about using the LLM to write the comment and not just the code (i.e. 'r' and 'R')
     check if current file == latest rev on load, if not store a new rev
-    support API usage
     parametrize comment_to_prompt
     make the prompts all config -- or all files in .cmpr
-    editor should be a config
     add o / O for block insertions
       works the same as editing a block except the file starts empty and instead of replacing we insert
       once we show the file in the ruler, always adds to the current file
     add support for numbers (e.g. for G, d, etc)
-    support "extended" commands starting with ":"
     add 'd', 'p', 'P' so that moving around blocks is easy
     visual selection mode works with "r"
     visual selection mode works with "e"
@@ -306,17 +280,25 @@ Difficulty: 1-4
       stderr into a file into a "temporary" block
       heuristics identify errors and line numbers in a compiler-agnostic way
     FIX code formatting issues once and for all
-    ****** have cmpr handle it's own TODO items ******
-    support system prompts / "spanio_prompt" and "code_prompt" / "bootstrap" prompt
-    add to the prompt all the library methods that there are, and let it either use only those OR forward declare any additions
-    think about library ergonomics around prt2cmp (belongs in a library TODO not here)
-    find the right way to handle blocks (language agnostic, ...)
-    TOC presentation of blocks (LLM summarization???)
+    ***** have cmpr handle it's own TODO items *****
+    find the right way to handle blocks (language agnostic, ...) (maybe we have?)
+    TOC presentation of blocks (LLM summarization???) (kind of handled by "#" feature)
     intro video -- mp4 or gif in repo
     basic stats on blocks e.g. comment-code ratio
-    video note: we have done things (not 2048) out of training set
-    issue with the exec bit on bootstrap.sh
     experiment with GPT4 finetunes
-    Speaking of classifiers: let's say two blocks are added in different branches to the same empty file.
-    A classifier can be trained to predict which of the mutually agnostic blocks should be first.
-    Otherwise, a human must make the choice, or a policy which privileges one side as the server.
+
+    basic diff features
+      add "U" with a listing, most-recent first
+      ✓ checksum and index blocks
+        ✓ design how it will work
+        ✓ implement checksums for blocks, lines, files (in #checksum_code)
+        ✓ implement checksums for each rev
+      ✓ implement "find previous version of block"
+      ✓ support j/k, q, Enter
+      ✓ render timestamps
+      ✓ deal with non-adjacent duplication
+      ✓ show the progress
+      ✓ numbers shouldn't stop short
+      ✗ optimization (caching?)
+        ✗ implement out2atp
+      ✓ put the whole thing behind a flag or disable it
