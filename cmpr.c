@@ -376,6 +376,8 @@ typedef struct {
 /* #sbv_state @SBV_design
 
 The state struct for the SBV feature.
+
+@- This is the "select block version" feature available by "U"; the rest of the code and documentation comes later but we need the state struct declared early.
 */
 
 typedef struct {
@@ -386,7 +388,12 @@ typedef struct {
     checksums sorted_line_cksums;
 } sbv_state;
 
-/* #all_functions #replywithok
+/* #all_functions
+Our functions are declared, usually in comments, and we have a Python script that extracts those decls into a header file.
+
+This is convenient, because it means we can write a block as a self-contained unit, but call that function from anywhere, without having to manually maintain a header file.
+
+Below these we have a list that we used to manually maintain; these should gradually be moved into their actual blocks.
 */
 
 #include "fdecls.h"
@@ -501,6 +508,10 @@ void clear_display();
 /* #ingest_functions
 
 When we start, get_code handles everything in the current project files, and get_revs handles all the historical revisions in revs/.
+
+The ingest() function is used whenever code is changed and it re-does everything.
+
+Finally, get_revs handles all the revs, which can be a significant amount of data, so this only happens when it is needed (currently on the "U" feature only).
 */
 
 void get_code(); // read and index current code
@@ -547,11 +558,6 @@ We call check_dirs() which creates any missing directories.
 Next we call a function get_code().
 This function reads the files indicated by our config file, populates inp, and handles any code indexing steps.
 
-Next we call get_revs(), which handles reading and indexing all of our revisions (in <cmprdir>/revs), but before calling this function we make a new rope for the rev contents, on state->revs.revrope, with size 32MiB.
-Even though we're exiting the process, we may as well release the rope, immediately before returning, of course, not here.
-
-@- We call bootstrap(), which updates the bootstrap prompt.
-
 Then we call main_loop().
 
 The main loop reads input in a loop and probably won't return, but just in case, we always call flush() before we return so that our buffered output from prt and friends will be flushed to stdout.
@@ -577,8 +583,6 @@ int main(int argc, char** argv) {
     check_conf_vars();
     check_dirs();
     get_code();
-    //get_revs(); // needs performance improvements; v9?
-    //bootstrap();
     main_loop();
 
     flush();
@@ -624,49 +628,52 @@ void call_llm(span model, json messages, void (*cb)(span)) {
 
 /* #read_openai_key
 
-In this function, we check that the file ~/.cmpr/openai-key exists and has the correct permissions.
+In this function, we check that the file ~/.cmpr/openai-key exists and can be read.
 
-@- Specifically, it should not have read permissions for any other user.
-@- How much do we care about this?
+We use getenv to get the HOME directory, and construct the path from there (using a char buffer of size PATH_MAX).
 
-We use null-terminated strings and standard C library functions for all of this.
+If it does not exist at all (via stat), we assume the user isn't using the feature and return silently.
+(Do not use readable_file here as this also tests for permissions errors, which we want to report.)
+This will leave openai_key empty, indicating that the API is not available.
+On the other hand, if it exists but anything goes wrong reading it, we complain loudly.
 
-We then extend cmp.end to fit the file contents, and read the file contents into that space.
+@complain_and_exit
+
+We use read_file_into_cmp to read (and will also report errors and exit if any).
 
 We set state.openai_key to point to the file contents.
 
 However, we actually want to trim whitespace (such as a newline that must end the file) in case we print the key as a string (such as in an HTTP header), so we call trim() on it.
-
-If any of the steps fail, we return and do nothing.
-This will leave openai_key empty, indicating that the API is not available.
-
-(Actually, not any of the steps, update this.)
 */
 
 void read_openai_key() {
-    const char* key_path = ".cmpr/openai-key";
+    char path[PATH_MAX];
     struct stat st;
-
-    //if (stat(key_path, &st) == -1 || st.st_mode != (S_IRUSR | S_IFREG) || st.st_uid != getuid()) {
-    if (stat(key_path, &st) == -1) {
+    const char* home = getenv("HOME");
+    
+    if (!home) {
+        prt("HOME environment variable is not set.\n");
+        flush_err();
+        exit(1);
+    }
+    
+    snprintf(path, sizeof(path), "%s/.cmpr/openai-key", home);
+    
+    if (stat(path, &st) != 0) {
+        // File does not exist, silently return
         return;
     }
-
-    int fd = open(key_path, O_RDONLY);
-    if (fd == -1) {
-        prt("Failed to open key file");flush_err();exit(1);
+    
+    span file_content = read_file_into_cmp(S(path));
+    if (empty(file_content)) {
+        prt("Failed to read file: %s\n", path);
+        flush_err();
+        exit(1);
     }
-
-    span key_span = {cmp.end, cmp.end + st.st_size};
-    if (read(fd, cmp.end, st.st_size) != st.st_size) {
-        close(fd);
-        prt("Failed to read key file");flush_err();exit(1);
-    }
-    close(fd);
-    cmp.end += st.st_size;
-
-    state->openai_key = trim(key_span);
+    
+    state->openai_key = trim(file_content);
 }
+
 /* #call_gpt
 
 Here we talk to an OpenAI model via the API.
