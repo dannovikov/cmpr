@@ -1389,6 +1389,8 @@ I'm going to add sqlite.
 
 Then I'm reimplementing the undo caching.
 
+(Update: added and tested and removed sqlite, and used the original approach instead.)
+
 
 
 

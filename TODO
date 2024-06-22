@@ -150,12 +150,29 @@
   ✓ bugfix :inrefs, :toprefs crashes
   ✓ chmod issue on Windows (exec bit)
   ✓ bump version and push v8
+  ✓ basic diff features
+    ✓ add "U" with a listing, most-recent first
+      ✓ checksum and index blocks
+        ✓ design how it will work
+        ✓ implement checksums for blocks, lines, files (in #checksum_code)
+        ✓ implement checksums for each rev
+      ✓ implement "find previous version of block"
+      ✓ support j/k, q, Enter
+      ✓ render timestamps
+      ✓ deal with non-adjacent duplication
+      ✓ show the progress
+      ✓ numbers shouldn't stop short
+      ✓ optimization (caching?)
+      ✓ put the whole thing behind a flag or disable it
+  ✓ integrate sqlite
+  ✓ remove sqlite
+  ✓ improve revblock caching and re-enable undo feature
 
 
 
 
 WHAT WE ARE CURRENTLY DOING:
-  → integrate sqlite
+  → bump version and push v9
 
 
 
@@ -284,19 +301,3 @@ WHAT WE ARE CURRENTLY DOING:
     intro video -- mp4 or gif in repo
     basic stats on blocks e.g. comment-code ratio
     experiment with GPT4 finetunes
-
-    basic diff features
-      add "U" with a listing, most-recent first
-      ✓ checksum and index blocks
-        ✓ design how it will work
-        ✓ implement checksums for blocks, lines, files (in #checksum_code)
-        ✓ implement checksums for each rev
-      ✓ implement "find previous version of block"
-      ✓ support j/k, q, Enter
-      ✓ render timestamps
-      ✓ deal with non-adjacent duplication
-      ✓ show the progress
-      ✓ numbers shouldn't stop short
-      ✗ optimization (caching?)
-        ✗ implement out2atp
-      ✓ put the whole thing behind a flag or disable it

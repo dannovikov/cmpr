@@ -1,3 +1,30 @@
+# v9
+
+### Undo
+
+There is now a basic undo feature.
+
+The first time you use the feature it will create a rev cache.
+(Subsequent times will still have to read the cache, but it will be faster than the first time.)
+The cache is only generated, or read, the first time you use the "U" command, so startup remains snappy.
+
+To use the "U" command, hit "U" while on a block.
+All previous revs will be searched for blocks that are "similar enough" to this one to count as a version of it.
+"Similar enough" means that either 8 lines in the block are the same as the current contents of the block, or that one of the ids of the block is a match.
+(At some future point we might give you a way to tune the sensitivity of the similarity search if it seems useful.)
+(This is one reason to use multiple block ids, if you want to "connect" current version of code to some specific prior implementation.)
+(This is another reason to give your blocks ids, though the similarity search works surprisingly well.)
+
+Once you hit "U" you are in the undo mode.
+Use j/k to navigate backwards (down) through the history and back up.
+For each older version of the block you can see the timestamp when it was saved.
+If you want to revert to an old version of a block, hit Enter on it, and it will replace the current contents of the block.
+If you then want to go back again, you can use "U" again.
+The previous version will still be in there, and since the similarity metric is symmetric, it will still be matched, even if the block doesn't have an id.
+
+The similarity measure is very basic (and fast) but will probably be tuned over the coming months.
+If you find any cases that don't do the most useful thing, please let us know about them!
+
 # v8
 
 ### Block references

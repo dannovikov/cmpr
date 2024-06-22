@@ -59,6 +59,9 @@ You can think of it as a span with a progress bar.
 - split_commas_ws(span): splits a span into a spans on commas, stripping whitespace
 - split_whitespace(span): split a span into tokens on whitespace
 - concat(span,span): Returns a new span (in cmp space) containing a concatenation.
+- parse_int(span): Parse an int, but without altering the span.
+- parse_hex(span): Parse a hex value, without altering the span.
+- scan_int(span*), scan_hex(span*): Similar, but advances the span past the parsed value.
 
 typedef struct { u8* buf; u8* end; } span; // the type of span
 
@@ -194,6 +197,7 @@ If you want the actual string value, you can use json_un_s, which returns a new 
 #define dbgx(x) prt(#x ": %x\n", x),flush()
 #define dbgf(x) prt(#x ": %f\n", x),flush()
 #define dbgp(x) prt(#x ": %p\n", x),flush()
+#define dbgs(x) prt(#x ": %.*s\n", len(x), x.buf),flush()
 
 typedef unsigned char u8;
 

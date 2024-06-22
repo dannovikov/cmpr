@@ -180,6 +180,7 @@ MAKE_ARENA(projfile, projfiles, 256)
 To support a particular memory allocation and access pattern we have the following interface:
 
 rope rope_new(size_t);
+int rope_isnull(rope); // 1 if initialized, 0 otherwise
 void rope_release(rope*);
 span rope_alloc_atleast(rope*,size_t);
 
@@ -221,6 +222,10 @@ rope rope_new(size_t initial_size) {
     r.head->memory = (u8 *)malloc(r.head->cap);
     r.head->next = NULL;
     return r;
+}
+
+int rope_isnull(rope r) {
+    return r.head ? 0 : 1;
 }
 
 void rope_release(rope *r) {
@@ -572,7 +577,7 @@ int main(int argc, char** argv) {
     check_conf_vars();
     check_dirs();
     get_code();
-    get_revs(); // needs performance improvements; v9?
+    //get_revs(); // needs performance improvements; v9?
     //bootstrap();
     main_loop();
 
@@ -1818,7 +1823,7 @@ void get_revs() {
     exit(0);
     */
     // before calling get_revs_2 we initialize the rope
-    state->revs.revrope = rope_new(16 * 1024 * 1024);
+    //state->revs.revrope = rope_new(16 * 1024 * 1024);
     get_revs_2();
 }
 
@@ -1869,11 +1874,19 @@ span read_file_into(span filename, rope *r) {
 
 void get_revs_2();
 
-This function populates state->revs.
+This function populates, or partly populates, state->revs.
+
+First we clear the display.
 
 We have already a sorted list of revisions' filenames' basenames already populated on the rev_info struct on state.
 However, the revblocks, which are metadata about these revs, are not set up yet, and that is what we must do here.
-We will set up the revblocks, managing the memory as necessary inside get_revs_2.
+
+Or rather, we set up revblocks only for revisions that haven't already been set up.
+First, we look at state->revs.revblocks[0] (if there is at least one revblock) and we get the timestamp of that block.
+We can call this the latest rev timestamp.
+We also store the current number of revblocks, as we will need this later to fix up the order.
+
+Also, if the state->revs.revrope has not been set, rope_isnull() of it will be true; then we set that up with an initial size of 32MiB.
 
 We want, for each rev, a sorted list of line hashes for that rev, which we will then use to identify the best matching file, to pick the language to blockize, and then create our chronological sequence of block revs, which we will in turn use for the "U" feature.
 We will later probably optimize this to lazily access all revs as needed.
@@ -1891,10 +1904,13 @@ This is called the "working set" and is only used as an argument to get_revs_cac
 
 Then we iterate over the revs themselves, in reverse order.
 For each rev, in reverse order, we first read into the rope (on state->revs.revrope, already initialized) using read_file_into.
-We print "rev hashing: n/N", where the numbers come from our iteration, and with an [H escape code to always appear in the top left (with prt and flush).
+We print "rev hashing: n/N", where the numbers come from our iteration, and with an \033[H escape code to always appear in the top left (with prt and flush).
 We have the basenames (on `filenames`) but we need to prepend the revdir using prs with "%.s/revs/%.s" with state->cmprdir and the given basename.
 First we put the basename in a variable, bname, as we know we will also need it later if we do a cache put.
 Our rev block spans will point into the memory of the rope (which main will later release).
+
+We take the bname and call a helper function to get the timestamp from it.
+If this timestamp is less than (earlier than) or equal to the latest rev timestamp, then we have already handled everything and we break out of the revs loop.
 
 For each non-empty rev we now need the metadata about the rev blocks.
 (If the rev file is empty, it contains no blocks and we skip it.)
@@ -1904,34 +1920,65 @@ Otherwise, the cache read also sets up everything in memory, so we are done with
 
 If the cache was a miss, then we both calculate and cache the data for next time with get_revs_cache_put().
 (This takes the working set, the bname, and the contents of the rev as arguments.)
+
+After our loop, we will have added new revblocks, in reverse chronological order.
+However, if there were any existing revblocks, we will have added our new ones after them.
+Therefore, we will use the number of previous revblocks that we stored, the current number of revblocks, and memmove to fix the order.
+Specifically, we allocate some memory for the newly added revblocks, copy them into it, then copy the previously existing blocks to the later positions in the revblocks array, and then finally copy the new revblocks to the front of the array and free the temporary malloc'd memory.
+Since everything is a contiguous array in state->revs.revblocks, this is straightforward.
 */
 
 void get_revs_2() {
     clear_display();
-    checksums* working_set = malloc(state->files.n * sizeof(checksums));
-    for (int i = 0; i < state->files.n; i++) {
+    time_t latest_rev_timestamp;
+    int prev_revblocks_count;
+
+    if (state->revs.n_revblocks > 0) {
+        latest_rev_timestamp = state->revs.revblocks[0].timestamp;
+        prev_revblocks_count = state->revs.n_revblocks;
+    } else {
+        latest_rev_timestamp = 0;
+        prev_revblocks_count = 0;
+    }
+
+    if (rope_isnull(state->revs.revrope)) {
+        state->revs.revrope = rope_new(32 * 1024 * 1024);
+    }
+
+    int num_projfiles = state->files.n;
+    checksums* working_set = malloc(num_projfiles * sizeof(checksums));
+    for (int i = 0; i < num_projfiles; ++i) {
         working_set[i] = sorted_line_checksums(state->files.a[i].contents);
     }
 
-    for (int i = state->revs.filenames.n - 1; i >= 0; i--) {
+    for (int i = state->revs.filenames.n - 1; i >= 0; --i) {
+        span bname = state->revs.filenames.a[i];
+        span rev_path = prs("%.*s/revs/%.*s", len(state->cmprdir), state->cmprdir.buf, len(bname), bname.buf);
         prt("\033[Hrev hashing: %d/%d", state->revs.filenames.n - i, state->revs.filenames.n);
-        //prt("rev hashing: %d/%d", state->revs.filenames.n - i, state->revs.filenames.n);
         flush();
 
-        span bname = state->revs.filenames.a[i];
-        // see comment in get_revs_cache_put
-        //u8* end = cmp.end;
-        span rev_path = prs("%.*s/revs/%.*s", len(state->cmprdir), state->cmprdir.buf, len(bname), bname.buf);
         span rev_contents = read_file_into(rev_path, &state->revs.revrope);
-        //cmp.end = end;
-
         if (empty(rev_contents)) {
             continue;
+        }
+
+        time_t rev_timestamp = parse_rev_fname(bname);
+        if (rev_timestamp <= latest_rev_timestamp) {
+            break;
         }
 
         if (!get_revs_cache_get(bname, rev_contents)) {
             get_revs_cache_put(working_set, bname, rev_contents);
         }
+    }
+
+    if (prev_revblocks_count > 0) {
+        int new_revblocks_count = state->revs.n_revblocks - prev_revblocks_count;
+        rev_block* new_revblocks = malloc(new_revblocks_count * sizeof(rev_block));
+        memcpy(new_revblocks, state->revs.revblocks + prev_revblocks_count, new_revblocks_count * sizeof(rev_block));
+        memmove(state->revs.revblocks + new_revblocks_count, state->revs.revblocks, prev_revblocks_count * sizeof(rev_block));
+        memcpy(state->revs.revblocks, new_revblocks, new_revblocks_count * sizeof(rev_block));
+        free(new_revblocks);
     }
 
     free(working_set);
@@ -2080,7 +2127,7 @@ int scan_int(span* sp) {
 
 /* #parse_int
 
-int parse_int(span);
+int parse_int(span); // parse int without mutating
 
 Here we parse an int off the front of a span.
 
@@ -2185,9 +2232,10 @@ int parse_revfile_cache(span bname, span rev_cache, span rev_contents) {
     parse_section_header_line(&failure, &section_type, &block_number, &rev_cache);
     if (section_type < 0) return 0;
     int rev_block_idx = n_existing_revblocks + block_number - 1;
+    time_t timestamp = parse_rev_fname(bname);
     switch (section_type) {
       case SECTION_BLOCKS:
-        parse_blocks_lines(&failure, n_blocks, rev_contents, &rev_cache);
+        parse_blocks_lines(&failure, timestamp, n_blocks, rev_contents, &rev_cache);
         break;
       case SECTION_SCS:
         parse_scs_lines(&failure, rev_block_idx, &rev_cache);
@@ -2221,10 +2269,11 @@ If it works, we set *section_type to one of the SECTION_* constants, and *block_
 
 void parse_section_header_line(int *failure, int *section_type, int *block_number, span *rev_cache) {
     span line = next_line(rev_cache);
-    wrs(line);terpri();flush();
     *failure = 0;
     *section_type = -1;
     *block_number = -1;
+
+    while(empty(line)) line = next_line(rev_cache);
 
     if (span_eq(line, S("blocks"))) {
         *section_type = SECTION_BLOCKS;
@@ -2235,13 +2284,14 @@ void parse_section_header_line(int *failure, int *section_type, int *block_numbe
         *section_type = SECTION_IDS;
         *block_number = parse_int(skip_n(line, 6));
     } else {
+        prt("failed to parse as section header line (press any key to continue): %.*s\n", len(line), line.buf);flush();getch();
         *failure = 1;
     }
 }
 
 /* #parse_blocks_lines @revs_cache_design @rev_info:code
 
-void parse_blocks_lines(int *failure, int n_blocks, span rev_contents, span* rev_cache);
+void parse_blocks_lines(int *failure, time_t timestamp, int n_blocks, span rev_contents, span* rev_cache);
 
 All errors we report by setting *failure to a non-zero value and returning.
 
@@ -2254,7 +2304,7 @@ In each line, we split it at the comma.
 
 If it does not contain a comma, that is an error.
 
-We parse_int both the ints.
+We parse_int both the ints, before and after the comma.
 We interpret the ints relative to rev_contents, which gives us a new span.
 
 We use revblocks, n_revblocks, and cap_revblocks (on state->revs) to manage the revblocks array.
@@ -2263,50 +2313,53 @@ If it is zero, doubling won't work so we set it to 256 instead.
 
 We then extend revblocks, with the new span being the .contents of the new rev_block.
 
+We also set the timestamp.
+
 If the number of lines we have handled is not equal to n_blocks, that is an error.
 */
 
-void parse_blocks_lines(int *failure, int n_blocks, span rev_contents, span* rev_cache) {
-    int line_count = 0;
+void parse_blocks_lines(int *failure, time_t timestamp, int n_blocks, span rev_contents, span* rev_cache) {
+    span line;
+    int lines_handled = 0;
+
     while (!empty(*rev_cache)) {
-        span line = next_line(rev_cache);
-        if (empty(line)) break; // Find blank line
+        line = next_line(rev_cache);
+        if (empty(line)) break;
 
-        line_count++;
-        int comma_index = find_char(line, ',');
-        if (comma_index == -1) {
+        int comma_pos = find_char(line, ',');
+        if (comma_pos == -1) {
             *failure = 1;
             return;
         }
 
-        span start_span = take_n(comma_index, &line);
-        advance(&line, 1); // Skip comma
-        span end_span = line;
+        span first_int_span = take_n(comma_pos, &line);
+        span second_int_span = skip_n(line, 1);
 
-        int start = parse_int(start_span);
-        int end = parse_int(end_span);
-        if (end <= start) {
+        int start_offset = parse_int(first_int_span);
+        int end_offset = parse_int(second_int_span);
+
+        if (lines_handled >= n_blocks) {
             *failure = 1;
             return;
         }
 
-        span block_contents = { .buf = rev_contents.buf + start, .end = rev_contents.buf + end };
-
-        if (state->revs.n_revblocks == state->revs.cap_revblocks) {
-            state->revs.cap_revblocks *= 2;
-            if (state->revs.cap_revblocks == 0) state->revs.cap_revblocks = 256;
+        if (state->revs.cap_revblocks == 0) {
+            state->revs.cap_revblocks = 256;
             state->revs.revblocks = realloc(state->revs.revblocks, state->revs.cap_revblocks * sizeof(rev_block));
-            if (!state->revs.revblocks) {
-                *failure = 1;
-                return;
-            }
+        } else if (state->revs.n_revblocks >= state->revs.cap_revblocks) {
+            state->revs.cap_revblocks *= 2;
+            state->revs.revblocks = realloc(state->revs.revblocks, state->revs.cap_revblocks * sizeof(rev_block));
         }
 
-        rev_block* new_block = &state->revs.revblocks[state->revs.n_revblocks++];
-        new_block->contents = block_contents;
+        span block_span = (span){ .buf = rev_contents.buf + start_offset, .end = rev_contents.buf + end_offset };
+
+        state->revs.revblocks[state->revs.n_revblocks].contents = block_span;
+        state->revs.revblocks[state->revs.n_revblocks].timestamp = timestamp;
+        state->revs.n_revblocks++;
+        lines_handled++;
     }
 
-    if (line_count != n_blocks) {
+    if (lines_handled != n_blocks) {
         *failure = 1;
     }
 }
@@ -2319,32 +2372,32 @@ Here we parse a section body of sorted checksums lines off the front of rev_cach
 
 We first iterate over next lines of a copy until we find a blank line, so we know how many there are.
 
-Then we allocate a checksums of the right number, assigning it onto the appropriate revblock on (state->revs.revblocks).
-
-We iterate over the next_lines of rev_cache itself, and use scan_checksum on each line, pushing each one onto the sorted_checksums on the revblock.
+Then we allocate a checksums of the right number.
+We iterate over the next_lines of rev_cache itself, and use scan_checksum on each line, pushing each one onto the sorted checksums.
+Finally we assign it onto the appropriate revblock on (state->revs.revblocks).
 */
 
 void parse_scs_lines(int *failure, int rev_block_idx, span* rev_cache) {
     span copy = *rev_cache;
-    int count = 0;
+    int num_lines = 0;
+
     while (!empty(copy)) {
         span line = next_line(&copy);
-        if (empty(trim(line))) break;
-        count++;
+        if (len(line) == 0) break;
+        num_lines++;
     }
 
-    checksums cks = checksums_alloc(count);
-    state->revs.revblocks[rev_block_idx].sorted_line_cksums = cks;
-
-    for (int i = 0; i < count && !empty(*rev_cache); i++) {
+    checksums cksums = checksums_alloc(num_lines);
+    for (int i = 0; i < num_lines; i++) {
         span line = next_line(rev_cache);
-        if (empty(trim(line))) break;
-        checksum ck = scan_checksum(line);
-        checksums_push(&cks, ck);
+        checksum cs = scan_checksum(line);
+        checksums_push(&cksums, cs);
     }
+
+    state->revs.revblocks[rev_block_idx].sorted_line_cksums = cksums;
 }
 
-/* #parse_ids_lines @rev_cache_design
+/* #parse_ids_lines @revs_cache_design @parse_int
 
 void parse_ids_lines(int *failure, int rev_block_idx, span* rev_cache);
 
@@ -2352,54 +2405,49 @@ Here we parse ids lines off the front of rev_cache until meeting a blank line.
 
 If there is any parse failure we will indicate that by setting *failure to 1.
 
-First we make a copy and count the non-blank lines.
-
+First count the non-blank lines, by making a copy of rev_cache and iterating until we find a blank line.
 Then we alloc a spans to hold the ids, and we assign it directly in place onto state->revs.revblocks with the given index.
 We put the contents span in a variable for use later.
 
-We iterate next lines again directly off rev_cache.
+Next we loop over the non-blank next lines again, but this time, directly using rev_cache rather than a copy (since the intention is actually to consume the lines).
 
 For each line we split on the comma; if there is no comma it is an error.
 Then we parse the ints before and after the comma.
 We iterpret them as offsets into the contents of the revblock.
 Adding them to the .buf of the contents gives us a new span, which we push onto the ids for the revblock.
+Note that we must push them in place on the revblocks, not onto a local copy of the spans, as that won't update .n.
 */
 
 void parse_ids_lines(int *failure, int rev_block_idx, span* rev_cache) {
-    span rev_cache_copy = *rev_cache;
-    int non_blank_lines = 0;
-
-    while(!empty(*rev_cache)) {
-        span line = next_line(rev_cache);
-        if (len(trim(line)) == 0) break;
-        non_blank_lines++;
+    span cache_copy = *rev_cache;
+    int id_count = 0;
+    while (!empty(cache_copy)) {
+        span line = next_line(&cache_copy);
+        if (empty(trim(line))) break;
+        id_count++;
     }
 
-    spans ids = spans_alloc(non_blank_lines);
-    state->revs.revblocks[rev_block_idx].ids = ids;
+    state->revs.revblocks[rev_block_idx].ids = spans_alloc(id_count);
     span contents = state->revs.revblocks[rev_block_idx].contents;
 
-    while (!empty(rev_cache_copy)) {
-        span line = next_line(&rev_cache_copy);
-        if (len(trim(line)) == 0) break;
-        span comma = S(",");
-        int comma_idx = find_char(line, comma.buf[0]);
+    while (!empty(*rev_cache)) {
+        span line = next_line(rev_cache);
+        if (empty(trim(line))) break;
+
+        int comma_idx = find_char(line, ',');
         if (comma_idx == -1) {
             *failure = 1;
             return;
         }
 
-        span first_part = take_n(comma_idx, &line);
-        advance(&line, 1); // Skip the comma
-        span second_part = line;
+        span before_comma = first_n(line, comma_idx);
+        span after_comma = skip_n(line, comma_idx + 1);
 
-        int first_offset = parse_int(first_part);
-        int second_offset = parse_int(second_part);
+        int start = parse_int(before_comma);
+        int end = parse_int(after_comma);
 
-        span id_span;
-        id_span.buf = contents.buf + first_offset;
-        id_span.end = contents.buf + second_offset;
-        spans_push(&ids, id_span);
+        span id_span = { contents.buf + start, contents.buf + end };
+        spans_push(&state->revs.revblocks[rev_block_idx].ids, id_span);
     }
 }
 
@@ -2640,7 +2688,8 @@ Since ordinary 8-bit char inputs will be in range 0-255, we start with 256.
 These are ints and we define for now just the four arrow keys ARROW_{U,D,L,R}.
 (Ordinary ASCII (and UTF-8) input will just be returned as itself.)
 
-We turn off canonical mode and echo on the terminal, and set the minimum characters to 0 and the timeout to 1/10 of a second.
+@- We turn off canonical mode and echo on the terminal, and set the minimum characters to 0 and the timeout to 1/10 of a second.
+We turn off canonical mode and echo on the terminal, and set the minimum characters to 1 and the timeout to 1/10 of a second.
 
 Then we read a character, handling EAGAIN until we get input.
 
@@ -2667,7 +2716,7 @@ int getkey() {
     tcgetattr(STDIN_FILENO, &oldt);
     newt = oldt;
     newt.c_lflag &= ~(ICANON | ECHO);
-    newt.c_cc[VMIN] = 0;
+    newt.c_cc[VMIN] = 1;
     newt.c_cc[VTIME] = 1;
     tcsetattr(STDIN_FILENO, TCSANOW, &newt);
 
@@ -2835,6 +2884,9 @@ int rev_block_match(sbv_state* sbvs, rev_block* current_revblock) {
 
 void select_block_version();
 
+First we call get_revs.
+(Since this is somewhat slow, it is only called when needed, rather than from main.)
+
 We set up an sbv_state struct sbvs.
 The max_index begins at -1, the current_index at 0, and we allocate (and later free) the memory for the revblock indices.
 We get the block ids for the current block by calling a function and store them on the feature state struct.
@@ -2851,6 +2903,7 @@ Then we enter our loop, which:
 */
 
 void select_block_version() {
+    get_revs();
     sbv_state sbvs;
     sbvs.max_index = -1;
     sbvs.current_index = 0;
@@ -3653,7 +3706,7 @@ void handle_keystroke(char input) {
             //rev_decr();
             break;
         case 'U':
-            //select_block_version();
+            select_block_version();
             break;
         case ' ':
             page_down();
