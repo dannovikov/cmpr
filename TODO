@@ -149,23 +149,26 @@
   ✓ merge 2 PRs
   ✓ bugfix :inrefs, :toprefs crashes
   ✓ chmod issue on Windows (exec bit)
+  ✓ bump version and push v8
 
 
 
 
 WHAT WE ARE CURRENTLY DOING:
-  → bump version and push v8
+  → integrate sqlite
 
 
 
 
+    rename bootstrap to global context block
+    scope the templating work (first pass: template our own stuff)
+    change the "----" thing now that chatgpt does markdown everywhere
     dedup transitive block references
     Arena overflow for spans
     I think flush should probably never apply to cmp, only out
-    rename bootstrap to global context block
     "Error: Block does not belong to any file." happened
       context: added a space before a "#" in the last markdown block in the last file, then :wq
-    actually index block ids
+    Also there was an error when creating a new file in a Python project (because the file was empty, I think)
     make "@" be a menu of references from this block
     "@@" or sth is menu of blocks that refer to us
     automatically suggest regen of stale downstream blocks
@@ -175,7 +178,6 @@ WHAT WE ARE CURRENTLY DOING:
     make LLM calls asynchronous
     clipboard model set automatically
     add :allfiles to autopopulate conf, and an empty state (?)
-    cmprdir should be auto-set
     ~/.cmpr for top-level conf
     send everything to LLM and create a bootstrap? ctags?
     ship with some kind of bootstrap bootstrap?
@@ -189,7 +191,6 @@ WHAT WE ARE CURRENTLY DOING:
     QA on --init and setting language
     turn a template into a shell script with cmpr calls embedded
     idea: cmpr --expand takes a template on stdin and returns text on stdout (or --eval) (it makes cmpr a database)
-    cmprdir should default to .cmpr/
     test / fix check_conf_vars (e.g. cmprdir missing)
     support other AIs via an external script
     idea: when a TODO item is done, put the relevant blocks in a comment

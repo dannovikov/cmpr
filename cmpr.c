@@ -11,11 +11,13 @@ int add(int a, int b) {
 
 /* #test_refs @test_block @config_fields
 
-Line one.
+The test_block and config_fields references in the line above are context references, and will be provided to the model as context for the current task.
+
+The projfiles reference below is an inline reference and will be expanded inline.
+
+In the inline form, the block reference must be on a line by itself.
 
 @projfiles
-
-Line N.
 
 Here's our add function:
 
@@ -29,12 +31,158 @@ Here's our add function:
 #include "siphash/siphash.h"
 #include "spanio.c"
 
+#include "libs/sqlite3.h"
+
 #include <dirent.h>
 
 typedef uint64_t u64;
 
 #define flush_exit(n) flush(); exit(n)
 
+
+/* Here we will implement shell blocks. */
+
+ /* What?
+
+First, let's define what a shell block is.
+It is a block that has a shell script as the PL part of it.
+Let's look at an example:
+
+[
+In this shell script we get a listing of the cwd.
+]
+
+#!/bin/sh
+
+ls
+
+[
+dir/
+file1.txt
+program.c
+]
+
+In this example we have three parts.
+First is the NL part, which describes the purpose and method used.
+This would also have a block id, which might double as a pathname.
+(We are using square brackets to indicate the start and end of the block comment, whatever that might be.)
+
+Then we have the shell script itself, including the shebang line.
+This can be directly copied into a file and run by either the user or the tool directly.
+
+Finally we have an output, which is the recording of stdout from a run of the script.
+In this case this contains a directory listing, which means this allows us to bring generated outputs into the same workflow as code.
+This becomes part of the block, if we implement it as shown here.
+
+This also lets us do powerful things from C.
+For example, we can allow the user to write a script that talks to an arbitrary LLM.
+Then if we include that script and run it (instead of curl) we can support that model.
+
+As another example, we can use a script, written by GPT4, to get sqlite into our project.
+This gives us free documentation of what was done, and an easy upgrade path if we decide to try a newer version.
+*/
+
+
+ /* How?
+
+We implement shell blocks as (potentially) tripartite blocks, with NL part, PL part, and output.
+The output is self-describing, and will be in another separately formatted block comment.
+
+This can let us go through old runs just like we now do with block revisions.
+
+Or, we could store the output in a separate file.
+This is more in line with the API calls, and it's better for disk usage.
+
+We could also support both.
+For efficiency reasons, we must have the file version first, otherwise it limits the usefulness of the tool considerably.
+*/
+
+ /* Where?
+
+Ultimately we will have a popen or system call which runs the script and outputs to a file.
+The script itself might as well already be in a file, then.
+This means we don't have shell blocks, but shell files.
+
+Or rather, scripts are one-block-per-file.
+This makes some sense because scripts are generally short; they should be entry points or orchestration.
+
+In other words, instead of writing out a block to a file and then running the file, we might as well ...actually we can just do that.
+So we actually don't need to restrict scripts to being one block per file.
+Instead you can have one block that defines a script and we will create the file when we run it for you.
+So this is making cmpr a bit more than an editor.
+But it makes sense to build Jupyter-like features on top of this.
+
+This also means we can include shell scripts inside C files or Markdown or other files.
+
+It also suggests that, in a Python file, for example, we might automate the "__main__" noise so that you can use a file full of Python functions like a REPL or a REPL-ified IDE.
+*/
+
+/* #install-sqlite.sh
+
+#!/bin/sh
+
+In this script we install SQLite from the website.
+
+We use curl to fetch the sqlite download page (https://www.sqlite.org/download.html).
+
+As that page states:
+
+```
+For convenient, script-driven extraction of the downloadable file URLs and associated information, an HTML comment is embedded in this page's source. Its first line (sans leading tag) reads:
+
+    Download product data for scripts to read
+
+Its subsequent lines comprise a CSV table with this column header:
+
+    PRODUCT,VERSION,RELATIVE-URL,SIZE-IN-BYTES,SHA3-HASH
+
+The column header and following data lines have no leading space. The PRODUCT column is a constant value ("PRODUCT") for convenient regular expression matching. Other columns are self-explanatory. This format will remain stable except for possible new columns appended to the right of older columns. 
+```
+
+Therefore we can pipe the curl output into grep, using grep to look for any line that starts with the literal string "PRODUCT".
+This should give us the raw CSV listing of released versions.
+
+Here we write the 'get-versions' shell function.
+*/
+
+ /* We don't have shell support yet, so manually managed:
+
+#!/bin/sh
+
+sqlite_versions() {
+  curl -s https://www.sqlite.org/download.html | grep '^PRODUCT'
+}
+
+*/
+
+ /* sh> sqlite_versions
+
+PRODUCT,VERSION,RELATIVE-URL,SIZE-IN-BYTES,SHA3-HASH
+PRODUCT,3.46.0,2024/sqlite-amalgamation-3460000.zip,2763740,1221eed70de626871912bfca144c00411f0c30d3c2b7935cff3963b63370ef7c
+PRODUCT,3.46.0,2024/sqlite-autoconf-3460000.tar.gz,3265248,83d2acf79453deb7d6520338b1f4585f12e39b27cd370fb08593afa198f471fc
+PRODUCT,3.46.0,2024/sqlite-doc-3460000.zip,10842823,54f612d5260e5a54fbf0824c83afbeb80f6b4b01148b89615d48af83e405dfc9
+PRODUCT,3.46.0,2024/sqlite-android-3460000.aar,3605431,c325e15e7dbe369eb1b2823d66bb9bf0fd516c241ac8dc9ea4a7f848ccdfb640
+PRODUCT,3.46.0,2024/sqlite-tools-linux-x64-3460000.zip,11047483,7ba6ea0d94e7b945b22e98cc306220e35156a34fe6e7a370beb88580569a4caf
+PRODUCT,3.46.0,2024/sqlite-tools-osx-x64-3460000.zip,3717483,99e2b1014211151e94d6ce0c91de03494bc8d3b749a739af120f5387effe5de8
+PRODUCT,3.46.0,2024/sqlite-dll-win-x86-3460000.zip,1056638,41eafc690909cc4244166f46f86c5f9704e4e6508e6e4a7202f98511fbbef221
+PRODUCT,3.46.0,2024/sqlite-dll-win-x64-3460000.zip,1322149,f4824402a8a08af1d05f22d77e487b238d9ff7ebb28942abad08c40c7ae50e91
+PRODUCT,3.46.0,2024/sqlite-tools-win-x64-3460000.zip,5035461,a0cf6a21509210d931f1f174fe68cbfaa1979d555158efdc059a5171ce108e1a
+PRODUCT,3.46.0,2024/sqlite-wasm-3460000.zip,846548,a426d7c1159d208c6ea18e3e2868ee36995ef52a3719756dbe1fc39c60361ac5
+PRODUCT,3.46.0,2024/sqlite-src-3460000.zip,14275927,32b3b0401edb46187c6bf3be982cbbe7512de594cb8d7780b7c3a0aa239a6cd2
+PRODUCT,3.46.0,2024/sqlite-preprocessed-3460000.zip,2869992,96405825dddd41e27527e9d52ab9ed81b3bb6b0016daa21d46fef1e9100c9c3f
+
+*/
+
+ /* rest done manually:
+
+ver=2024/sqlite-amalgamation-3460000.zip
+curl -sS -O 'https://www.sqlite.org/'"$ver"
+unzip -l sqlite-amalgamation-3460000.zip
+unzip sqlite-amalgamation-3460000.zip
+cd cmpr
+mkdir libs
+mv ../sqlite-amalgamation-3460000/sqlite3.{c,h} libs
+*/
 /*
 We record the request and response so we can calculate the cost.
 
@@ -296,6 +444,19 @@ typedef struct {
     rope revrope;
 } rev_info;
 
+/* #revs_cache_state
+
+The rev cache has some state.
+We declare the revs_cache_state struct, which will be used by #ui_state later.
+
+Currently this includes a sqlite3 db connection.
+
+Since state is a global, the revs_cache_state can always be accessed as state->revcache from anywhere, e.g. state->revcache.db gives the SQLite3 connection.
+*/
+
+typedef struct {
+    sqlite3 *db;
+} revs_cache_state;
 /* #ui_state
 
 We define a struct, ui_state, which we can use to store any information about the UI that we can then pass around to various functions as a single entity.
@@ -311,6 +472,7 @@ This includes, so far:
 - the jk_index, the number of "j/k items" prior to the selected one
 - a marked_index, which represent the "other end" of a selected range
 - revs, a rev_info structure which stores metadata about our revision history
+- revcache, a revs_cache_state structure which stores state related to the rev cache
 - block_idx, a spans which is an index of block ids
 - the search span which will contain "/" followed by some search if in search mode, otherwise will be empty()
 - the previous search span, used for n/N
@@ -337,6 +499,7 @@ typedef struct ui_state {
     int current_index;
     int marked_index;
     rev_info revs;
+    revs_cache_state revcache;
     spans block_idx;
     span search;
     span previous_search;
@@ -500,11 +663,11 @@ void get_code(); // read and index current code
 void get_revs(); // read and index revs
 spans find_blocks(span); // find the blocks in a file
 spans find_blocks_language(span file, span language); // find_blocks helper function dispatching on language
-void find_blocks_in(span content, span language); // might be implemented, and used by get_revs some day?
 checksum selected_checksum(span); // our selected checksum implementation
 void checksum_code(); // called by get_code to checksum blocks, lines, and files
 void find_all_lines(); // like find_all_blocks, but for lines; applies to the whole project
 void index_block_ids();
+void ingest(); // updates everything that needs to be updated after code has changed
 /* #main
 
 In main,
@@ -570,7 +733,7 @@ int main(int argc, char** argv) {
     check_conf_vars();
     check_dirs();
     get_code();
-    //get_revs(); // needs performance improvements; v9?
+    get_revs(); // needs performance improvements; v9?
     //bootstrap();
     main_loop();
 
@@ -1334,6 +1497,10 @@ void checksum_blocks() {
 
 /* #checksum_code @ingest_functions:code
 
+@- commented out the progress stuff as it's not needed (it's too fast to be visible), and it messes up programmatic output.
+
+@- also, not sure where any of this is currently used, so we might try getting rid of all of it
+
 Here we iterate over all the blocks and find a checksum for each one.
 We do the same for all files and all lines.
 
@@ -1352,13 +1519,19 @@ We use terminal escape codes to make sure this always starts flush left, at the 
 */
 
 void checksum_code() {
+
+  // do we still need any of this?
+  return;
+
     // Allocate checksums for blocks and lines
     state->block_cksums = checksums_alloc(state->blocks.n);
     state->line_cksums = checksums_alloc(state->lines.n);
 
     // Clear screen and print message for files
+    /*
     prt("\033[2J\033[HHashing %d Files\n", state->files.n);
     flush();
+    */
 
     // Iterate over files
     for (int i = 0; i < state->files.n; i++) {
@@ -1366,42 +1539,52 @@ void checksum_code() {
         state->files.a[i].cksum = selected_checksum(state->files.a[i].contents);
 
         // Progress indication
+        /*
         if (i % 16 == 0) {
             prt("\033[G%d/%d", i, state->files.n);
             flush();
         }
+        */
     }
 
+    /*
     // Clear screen and print message for blocks
     prt("\033[2J\033[HHashing %d Blocks\n", state->blocks.n);
     flush();
+    */
 
     // Iterate over blocks
     for (int i = 0; i < state->blocks.n; i++) {
         // Calculate checksum for the block
         state->block_cksums.a[i] = selected_checksum(state->blocks.a[i]);
 
+        /*
         // Progress indication
         if (i % 16 == 0) {
             prt("\033[G%d/%d", i, state->blocks.n);
             flush();
         }
+        */
     }
 
+    /*
     // Clear screen and print message for lines
     prt("\033[2J\033[HHashing %d Lines\n", state->lines.n);
     flush();
+    */
 
     // Iterate over lines
     for (int i = 0; i < state->lines.n; i++) {
         // Calculate checksum for the line
         state->line_cksums.a[i] = selected_checksum(state->lines.a[i]);
 
+        /*
         // Progress indication
         if (i % 16 == 0) {
             prt("\033[G%d/%d", i, state->lines.n);
             flush();
         }
+        */
     }
 }
 
@@ -1680,10 +1863,14 @@ span get_revdir() {
 }
 /* #complain_and_exit
 
-"Complain and exit" is not a the name of a function, but a name for a common pattern.
+"Complain and exit" is NOT the name of a function.
+(If you ever write complain_and_exit(), you are fired!)
+@- (Note: GPT4, for some reason, loves to hallucinate that a complain_and_exit function exists, hence the above increasingly strongly worded warning.)
+
+Instead, it is a name for a common pattern of prt, flush_err, exit(n>0).
+
 Generally, when things go wrong with C library functions, such as not being able to open files, allocate memory, or something that indicates programmer (not user) error, we "complain and exit".
-This means prt, flush, exit(n>0).
-When files are involved, always report the relevant filename or path in the message, not only the OS error.
+When files or other resources are involved, always report the relevant filename or path in the message, not only the OS error.
 (This is why we use prt directly, so that relevant information is more easily included.)
 */
 
@@ -1793,6 +1980,8 @@ void get_revs() {
     */
     // before calling get_revs_2 we initialize the rope
     state->revs.revrope = rope_new(16 * 1024 * 1024);
+    // and the revs cache db
+    setup_revcache_db();
     get_revs_2();
 }
 
@@ -1913,52 +2102,100 @@ void get_revs_2() {
 
 /* #revs_cache_design @rev_info
 
-This cache is written in an ASCII format on disk.
+This cache is written to an SQLite database on disk.
 
-This format describes the contents of a single rev file, and contains the following:
+The database is stored in <cmprdir>/cache/v9/revblocks.db (where <cmprdir> is a conf parameter state.cmprdir).
 
-- a short header
-- one or more sections, each with a short textual header followed by lines containing some data
-  - each one is preceded by a blank line (blank lines are separators, not terminators; N sections uses N-1 blank lines)
-- the section headers are "blocks", "block <n> scs", and "block <n> ids", and may appear in any order, with n being in [1, N], where N is the number of blocks in the rev
-- the "blocks" section is followed by pairs of integers, one per line, defined as start and end offsets (relative to rev file contents) for each block
-- the "blocks" section is the only place where we include per-block data (the length and location) without a block number
-- the "block <n> scs" section contains sorted checksums (scs), one checksum per line, printed in their sorted order as 16-byte hex values printed as %X
-- the "block <n> ids" section contains the ids of block n if it has any (otherwise this block is not printed), printed as integer pairs one per line with the offsets this time being relative to the block itself, i.e. the block "abc" with "b" as block id would have "1,2" as the block id line.
-- the timestamp (also part of the rev block structure, see @rev_info) is excluded from the cache, as it is derived from the bname itself (i.e. it's the key)
+The purpose of the cache is simply to load our data back into memory.
+We are not using many of the features of sqlite3 to query the data, rather we are going to iterate over all of it and load it into memory.
+So we have a simple way to store the data and a simple way to query it.
 
-The rev cache filenames are <cmprdir>/cache/v8/revs/<bname>, where <bname> corresponds to the rev file <cmprdir>/revs/<bname>.
+For each rev file, we store the following:
 
-The header contains lines of the form "<key>: <value>".
-The expected keys:
+- The language and number of blocks.
+- The natural key for rev files is the rev path (which includes a timestamp).
 
-"Language", "Blocks".
+Each file contains some number of blocks, so we will have a blocks relation as well.
+For each block we want to store the following data:
 
-This makes the files more human-readable, recording the language used to find the blocks, and the number found.
+- The start and end offsets, relative to the rev file contents.
+- The sorted checksums, which is notionally a list of 64-bit hashes.
+- The block ids, which is a set of offset pairs, which are relative to the block itself.
 
-The number of blocks listed under the "blocks" line should be equal to the count given by the Blocks header.
-
-For a C file containing a single block, with length 20 bytes, we might see the following cache file:
-
-Language: C
-Blocks: 1
-
-blocks
-0,20
-
-block 1 scs
-0123456789ABCDEF
-
-block 1 ids
-5,12
-
-This indicates that there is only one unique line in the block, having the given checksum (64 bits written as 16 bytes of ASCII hex using 0-F).
-
-There is one id in the block, which can be found by skipping 5 bytes and then reading 7 more (12 - 5).
-
-Note that the offset pairs (e.g. 0,20) under the "blocks" line are relative to the rev (e.g. the rev file's contents span).
-However, the offset pairs under the "block N ids" lines are always relative to the block.
 */
+
+/* #revs_cache_ddl
+-- SQLite data definition for the rev cache
+
+-- Create table for rev files
+CREATE TABLE IF NOT EXISTS rev_files (
+    id INTEGER PRIMARY KEY,             -- Primary key
+    rev_path TEXT NOT NULL UNIQUE,      -- Natural key: rev path (includes timestamp)
+    language TEXT,                      -- Language of the rev file
+    num_blocks INTEGER                  -- Number of blocks in the rev file
+);
+
+-- Create table for blocks
+CREATE TABLE IF NOT EXISTS blocks (
+    id INTEGER PRIMARY KEY,             -- Primary key
+    rev_file_id INTEGER,                -- Foreign key referencing rev_files.id
+    start_offset INTEGER,               -- Start offset of the block relative to the rev file contents
+    end_offset INTEGER,                 -- End offset of the block relative to the rev file contents
+    sorted_checksums BLOB,              -- Sorted checksums, stored as a BLOB (list of 64-bit hashes)
+    block_ids BLOB,                     -- Block ids, stored as a BLOB (set of offset pairs relative to the block)
+    FOREIGN KEY (rev_file_id) REFERENCES rev_files(id) -- Define foreign key constraint
+);
+
+-- Create an index on rev_file_id in the blocks table for faster lookups
+CREATE INDEX IF NOT EXISTS idx_blocks_rev_file_id ON blocks (rev_file_id);
+*/
+
+/* #setup_revcache_db @revs_cache_design @revs_cache_ddl @revs_cache_state:all
+
+void setup_revcache_db();
+
+Here we open the rev cache SQLite file, or create it if it doesn't exist.
+
+The db connection is stored for later as described in #revs_cache_state above.
+
+If the db didn't exist, then we run commands given in #revs_cache_ddl to set it up.
+*/
+
+void setup_revcache_db() {
+    char db_path[1024];
+    snprintf(db_path, sizeof(db_path), "%s/cache/v9/revblocks.db", s(state->cmprdir));
+    
+    if (sqlite3_open(db_path, &state->revcache.db) != SQLITE_OK) {
+        prt("Error opening SQLite database: %s\n", sqlite3_errmsg(state->revcache.db));
+        flush();
+        exit(1);
+    }
+
+    char *err_msg = NULL;
+    const char *ddl = 
+        "CREATE TABLE IF NOT EXISTS rev_files ("
+        "id INTEGER PRIMARY KEY,"
+        "rev_path TEXT NOT NULL UNIQUE,"
+        "language TEXT,"
+        "num_blocks INTEGER);"
+        "CREATE TABLE IF NOT EXISTS blocks ("
+        "id INTEGER PRIMARY KEY,"
+        "rev_file_id INTEGER,"
+        "start_offset INTEGER,"
+        "end_offset INTEGER,"
+        "sorted_checksums BLOB,"
+        "block_ids BLOB,"
+        "FOREIGN KEY (rev_file_id) REFERENCES rev_files(id));"
+        "CREATE INDEX IF NOT EXISTS idx_blocks_rev_file_id ON blocks (rev_file_id);";
+
+    if (sqlite3_exec(state->revcache.db, ddl, 0, 0, &err_msg) != SQLITE_OK) {
+        prt("SQL error: %s\n", err_msg);
+        sqlite3_free(err_msg);
+        flush();
+        exit(1);
+    }
+}
+
 /* #get_revs_cache_get @revs_cache_design
 
 int get_revs_cache_get(span bname, span rev_contents);
@@ -1973,7 +2210,6 @@ We read the cache file into cmp space.
 
 Then we parse the file by calling a helper function parse_revfile_cache, and return its result.
 
-*/
 
 int get_revs_cache_get(span bname, span rev_contents) {
     u8* cmp_end_backup = cmp.end;
@@ -1985,6 +2221,11 @@ int get_revs_cache_get(span bname, span rev_contents) {
     return result;
 }
 
+*/
+
+int get_revs_cache_get(span bname, span rev_contents) {
+  return 0;
+}
 /* #scan_checksum @checksums
 
 checksum scan_checksum(span);
@@ -2473,6 +2714,8 @@ void get_revs_cache_put(checksums* working_set, span bname, span content) {
 
     state->revs.n_revblocks += blocks.n;
 
+    revs_cache_put_sqlite(bname, language, prev_n_revblocks, content);
+    /*
     span cmprdir = state->cmprdir;
     u8* end = out.end;
     u8* ce = cmp.end;
@@ -2490,6 +2733,7 @@ void get_revs_cache_put(checksums* working_set, span bname, span content) {
     write_to_file_span(output, cache_path, 1);
     out.end = end;
     cmp.end = ce;
+    */
 }
 
 /* #pr_revinfo @revs_cache_design
@@ -2562,6 +2806,93 @@ void pr_revinfo(span language, spans blocks, int prev_n_revblocks, span contents
         }
     }
     //flush();
+}
+
+/* #revs_cache_put_sqlite @revs_cache_design @rev_info:code @revs_cache_ddl @revs_cache_state @checksums @complain_and_exit
+
+void revs_cache_put_sqlite(span bname, span language, int prev_n_revblocks, span rev_file_content);
+
+Here we populate the sqlite3 database for the revs cache, handling all the blocks in a given rev at once.
+
+The revblocks that we are caching are on state->revs.revblocks[idx] where the idx goes from prev_n_revblocks to the current number of revblocks.
+
+We are given: bname, the basename part of the rev (which also encodes the timestamp), the language used for blockizing, the previous number of revblocks, which are already cached, and the content of the rev file.
+
+When using sqlite3_bind_text with some span s, we use len() to specify the length directly, and s.buf to pass the direct u8* (cast to char*).
+(It is not necessary to use s(), as it is not necessary for the strings to be null-terminated when the length is explicitly given.)
+
+We can look up the actual span of the revblock as .contents on the revblock.
+This span will be relative to the span of the entire rev file, which is passed in.
+So we get the offsets by subtracting the .buf and .end of the revblock's span from that of the entire rev file.
+
+For the sorted checksums as blobs, we need to get the size of a checksum times the .n of the checksums.
+Then we just use the checksums.a itself as the pointer to the data.
+We can include for safety an assert stating that the sizeof the checksum type is 8 bytes (64 bits) as expected.
+
+For the block ids, we get the number of them, then we malloc an array of ints (which we must later free).
+Then we fill the array by taking the offsets of the ids relative to the block itself, i.e. the .buf and .end of each id span minus the .buf of the block in which the ids reside.
+
+Since we are single-threaded, we can use static for the prepared statements.
+*/
+
+void revs_cache_put_sqlite(span bname, span language, int prev_n_revblocks, span rev_file_content) {
+    static sqlite3_stmt *stmt_insert_revfile = NULL;
+    static sqlite3_stmt *stmt_insert_block = NULL;
+    
+    if (!stmt_insert_revfile) {
+        sqlite3_prepare_v2(state->revcache.db,
+            "INSERT INTO rev_files (rev_path, language, num_blocks) VALUES (?, ?, ?);",
+            -1, &stmt_insert_revfile, NULL);
+    }
+    if (!stmt_insert_block) {
+        sqlite3_prepare_v2(state->revcache.db,
+            "INSERT INTO blocks (rev_file_id, start_offset, end_offset, sorted_checksums, block_ids) VALUES (?, ?, ?, ?, ?);",
+            -1, &stmt_insert_block, NULL);
+    }
+
+    int num_blocks = state->revs.n_revblocks - prev_n_revblocks;
+    sqlite3_bind_text(stmt_insert_revfile, 1, (char *)bname.buf, len(bname), SQLITE_STATIC);
+    sqlite3_bind_text(stmt_insert_revfile, 2, (char *)language.buf, len(language), SQLITE_STATIC);
+    sqlite3_bind_int(stmt_insert_revfile, 3, num_blocks);
+
+    if (sqlite3_step(stmt_insert_revfile) != SQLITE_DONE) {
+        prt("Failed to insert revfile: %s\n", sqlite3_errmsg(state->revcache.db));
+        flush_err();
+        exit(1);
+    }
+
+    sqlite3_reset(stmt_insert_revfile);
+    int rev_file_id = (int)sqlite3_last_insert_rowid(state->revcache.db);
+
+    for (int i = prev_n_revblocks; i < state->revs.n_revblocks; ++i) {
+        rev_block *block = &state->revs.revblocks[i];
+        int start_offset = block->contents.buf - rev_file_content.buf;
+        int end_offset = block->contents.end - rev_file_content.buf;
+        assert(sizeof(checksum) == 8);
+        int sorted_cksums_size = block->sorted_line_cksums.n * sizeof(checksum);
+        
+        int n_ids = block->ids.n;
+        int *ids_offsets = malloc(n_ids * 2 * sizeof(int));
+        for (int j = 0; j < n_ids; ++j) {
+            ids_offsets[2 * j] = block->ids.a[j].buf - block->contents.buf;
+            ids_offsets[2 * j + 1] = block->ids.a[j].end - block->contents.buf;
+        }
+
+        sqlite3_bind_int(stmt_insert_block, 1, rev_file_id);
+        sqlite3_bind_int(stmt_insert_block, 2, start_offset);
+        sqlite3_bind_int(stmt_insert_block, 3, end_offset);
+        sqlite3_bind_blob(stmt_insert_block, 4, block->sorted_line_cksums.a, sorted_cksums_size, SQLITE_STATIC);
+        sqlite3_bind_blob(stmt_insert_block, 5, ids_offsets, n_ids * 2 * sizeof(int), SQLITE_STATIC);
+
+        if (sqlite3_step(stmt_insert_block) != SQLITE_DONE) {
+            prt("Failed to insert block: %s\n", sqlite3_errmsg(state->revcache.db));
+            flush_err();
+            free(ids_offsets);
+            exit(1);
+        }
+        sqlite3_reset(stmt_insert_block);
+        free(ids_offsets);
+    }
 }
 
 /*
@@ -4825,25 +5156,28 @@ api_calls/
 cache/
 cache/v8/
 cache/v8/revs/
+cache/v9/
 
+We use a char buffer with PATH_MAX and snprintf.
 */
 
 void check_dirs() {
-    span dirs[] = {
-        S("revs/"), 
-        S("tmp/"), 
-        S("api_calls/"), 
-        S("cache/"), 
-        S("cache/v8/"), 
-        S("cache/v8/revs/")
-    };
-    
-    char buffer[1024];
+    char buffer[PATH_MAX];
+    int n;
 
-    for (int i = 0; i < sizeof(dirs) / sizeof(dirs[0]); i++) {
-        snprintf(buffer, sizeof(buffer), "%.*s/%.*s", len(state->cmprdir), state->cmprdir.buf, len(dirs[i]), dirs[i].buf);
-        mkdir(buffer, 0777);
-    }
+    #define CHECK_DIR(dirname) \
+        n = snprintf(buffer, PATH_MAX, "%.*s/%s", len(state->cmprdir), state->cmprdir.buf, dirname); \
+        if (n >= 0 && n < PATH_MAX) mkdir(buffer, 0755);
+
+    CHECK_DIR("revs");
+    CHECK_DIR("tmp");
+    CHECK_DIR("api_calls");
+    CHECK_DIR("cache");
+    CHECK_DIR("cache/v8");
+    CHECK_DIR("cache/v8/revs");
+    CHECK_DIR("cache/v9");
+
+    #undef CHECK_DIR
 }
 
 /* #check_conf_vars

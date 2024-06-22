@@ -354,14 +354,12 @@ Then you can run any of my code by getting an index block from my server, listin
 Third half
 ----
 
-The third half is the diff layer.
+The first half of cmpr was going from NL to PL (e.g. English to Python).
+Second half is going the other way, PL to NL, which is critical for working with existing codebases.
+
+The "third half" is the diff layer.
 
 If you have a block and you want a better version of that block, you want to be able to describe the difference in English and have ChatGPT make it happen.
-
-In other words, there are two dimensions:
-
-- block index dimension
-- time dimension
 
 Between any two blocks a, b, there is a diff d(a,b) that represents the change from a to b, a delta or derivative.
 
@@ -1070,3 +1068,339 @@ Maybe ctags can even do this for me?
 Or we can get GPT to write a Python script for it.
 Which we now have.
 It's a heuristic approach, but all my function declarations are pretty simple.
+
+
+
+
+
+
+
+
+Planning
+----
+20240618
+
+Fixed points.
+
+Let's say we have a prompt such as "Read the following code [...] and verify the following invariant [...]."
+
+The LLM replies with whether or not the invariant holds.
+
+If it does not hold, the LLM can say why, or why it is not sure.
+
+This means that we have a new way of using the LLM to program:
+
+We set up the invariants that must hold, and then we run the system until it converges on a solution.
+
+One basic approach to this is as follows:
+
+We want both the invariants and the code to be at the NL level, so we have our invariants expressed in English and our implementation as well.
+The LLM is given the relevant context and asked to validate the invariant, which means it must be capable of doing so; this may require breaking down the implementation in a particular way or adding additional detail.
+
+Here is a concrete example:
+
+We currently have a dataloss bug, where some files aren't getting handled correctly and the user has to manually fix it.
+(The data isn't permanently lost, just misplaced.)
+
+As a human programmer, here's how I would defeat this bug:
+
+First of all, I want to define what it is that must not be supposed to happen.
+Currently the user is not sure what went wrong, but the changes aren't processed correctly and there's no error message or other explanation.
+So this is what we want to define out of existence.
+We want to always say that either the data will be processed fully, or there will be a message clearly shown to the user that explains what actually happened.
+
+Now how do we do that?
+
+In this case, we have a control flow path through certain parts of the code.
+Some data is written into a file, the file is processed in several steps, and finally the operation is finished.
+What we want to say is that, from the point where the operation begins, until the point where it is finished, there are only two possible outcomes.
+
+Now we have to say what "successful processing" means and what "notifying the user" means.
+
+These need to be clear enough that we can set a boolean to true in the code when they happen, i.e. we should be able to turn our definition into a definitive test.
+
+In other words, it's a kind of parallel programming problem, as it's another layer over the implementation itself.
+
+In our case, we can say that the user has to hit a key to dismiss the error message.
+This gives us a concrete definition of what it means for the user to be notified.
+A message has to be printed and we have to get some keyboard input.
+Obviously it's still possible for this keyboard input to come from somewhere other than the user, or for the message to not be visible somehow, but we have to draw a line somewhere.
+By stating it this way we make our definition of success concrete: print a message and get keyboard input acknowledging it.
+
+The other part is probably easier: we can define the successfull processing of it as saying that at the end of the process, certain contents are in some files or in memory or whatever defines the successful processing of the data.
+Again this should be something that we can make concrete enough that in any given circumstance we would be able to test it, i.e. write code that determines whether it happened or not at runtime.
+(At least for some known inputs, if not all.)
+
+But the point of this exercise is not to write tests, it's to write a proof (informally) that the code is correct.
+In fact, it's not to write the proof but to get things set up such that the LLM can write it.
+
+In our case this means looking at our code (in English, say, but it could also be the PL code) and verifying smaller invariants.
+
+At the top level it will look like this:
+
+When the user takes some action, the following chain of events happens: A, B, C, D.
+If everything works well, then after D the following will hold.
+
+Let's say, when the user hits "e" and edits a file, then saves and exits their editor, the result will be that the changes they made make it back into the program.
+This requires a certain set of steps, for example, the data has to be in the file after the editor has exited (which we can assume), and then it has to be handled a certain way by our code (which is what we want to be sure of).
+
+Essentially we have a "happy path" defined as a linear series of operations, one chaining into the next, with pre- and post-conditions for each, and at the end the result we care about.
+
+Then we define the exceptions.
+For each of the things that can go wrong, we need to specify how the user will be notified.
+
+Essentially our argument will follow the branch analysis in the code.
+Every time something can branch, we will generally show that either we continue on the happy path, or we go to a path that lets the user be notified.
+
+One way to do this is to have a single top-level if statement or branch.
+
+In other words, we have some function that returns success or failure.
+We can then easily prove that either the function won't return (i.e. the program crashes) or if it does, then the program will only take one of two paths.
+Then if one of those paths definitely notifies the user, that part is easy.
+However, now it's required to show that if a success result is returned, it really did succeed.
+
+Or you could have a path that either succeeds linearly and returns, or crashes, without any error return path.
+Then you can prove that either it will succeed or crash, and this is another way to make sure the user gets notified.
+
+Then we would break the argument down into steps, matching the steps of the implementation.
+Then we would have prompting that checks that the implementation always always does what it needs to do for each of the steps.
+
+The outcome of this is not actually a proof, because we don't care about that.
+The outcome is a process that we can use, without human effort, to determine whether or not the code is correct.
+
+So what we really want is an argument structure, and the mapping between this structure and the code, that the LLM can follow.
+And then we want this all to be robust and tested enough that we have confidence that if something changes and breaks the LLM will likely notice it, and also that the false positives will be low enough to make the system usable.
+
+So here's a basic sketch of how all this works in practice:
+
+You start out with your program in English.
+
+You then add your invariant, e.g. either feature X works with result Y or the user is notified.
+
+Then you define the invariant well enough that it can be verified.
+
+Then the LLM and you work together to create a proof sketch that satisfies you that the invariant is met.
+Along with the sketch is information about how the parts of the proof map onto parts of the code.
+For example, we can use block ids for this.
+
+Then we may end up with some refinements of the prompts that help the LLM understand how to map the argument onto the code.
+For example "the invariant holds because this function either writes data X to file Y or it exits with an error message".
+That should be something that the LLM can then read, along with the code of that function, and say whether it is true or not.
+
+To have confidence in this we should have examples of code that did not work and that the LLM can correctly identify as bad.
+
+The idea of the whole system is that the LLM will constantly look at all the code, and check it for all the invariants we have set up.
+
+If anything seems off, we can check it by prompting again, and if our probability is high enough that there's a real problem, then we show the human programmer the issue.
+
+Otherwise, the system has settled, or reached a fixed point.
+
+The whole system is a function that takes the current code and identifies any problems.
+Every time you change anything, we will set it all running again.
+Either the proofs will still work, or if something has changed, it will tell you what's wrong.
+
+Other simple examples are malloc and free in C, or closing files that have been opened, or responding to HTTP requests.
+In all these cases we wish to prove that whenever A happens, B also happens at some later point.
+We can start by just saying "every HTTP request should get a response" but then we have to break that down until we reach the level of confidence that we need.
+
+In other words, you only reach a fixed point when the system is reliable enough to catch real-world errors, but stable enough to be satisfied by the code you have.
+So there's a certain level of detail that the system has to reach before it will settle.
+
+Let's break down the malloc/free example for a sizeable C program.
+First of all, this is a parallel problem.
+We actually have specific data that malloc is used for, and for each of these, we want to know that it is not leaked.
+So we can first categorize it into sub-problems by every use of malloc.
+
+So at the top level, we have a "proof template" for mallocs, and at the top level is an assertion that every malloc has this proof template instantiated and filled out for it.
+This is something an LLM can easily check, i.e. for every block in the project, either it doesn't use malloc, or if it does, then we have another block that contains a proof template that the memory is freed.
+
+Then for the proof template it goes something like, either the memory is allocated once and used for the duration of the process, and doesn't grow further, or it grows slowly, or it grows repeatedly but it gets freed at regular intervals, or whatever it is that makes it ok.
+These will be different for different use cases, and they would be proved in different ways.
+Then for each one it will be proved in some suitable way.
+If some memory is used in a loop to process some files, we can simply show that in every iteration of the loop the memory is freed before more memory is allocated by the loop.
+
+
+
+
+
+
+
+
+"Database idea"
+----
+20240618
+
+The "database idea" is a vague term for an expansion of cmpr from a single-purpose tool to more of a framework for using LLMs to manipulate code in more flexible ways.
+
+The change starts by taking the features we already have and implementing them in terms of something more general.
+
+I'm going to use s-exps for simplicity.
+
+Currently the most important operations are "r" and "e".
+
+```
+(def (replace-code)
+  (let* ((idx (current-block))
+         (b (get-block idx))
+         (nl (comment-part b))
+         (prompt (comment-to-prompt nl))
+         (pl (llm prompt)))
+    (replace-block idx (make-block nl pl))))
+```
+
+In this implementation of "replace-code" or "r", we need to be able to read and write blocks, and break apart blocks into parts and put the parts back together.
+
+It's assumed that the "replace-block" implementation will handle storing a rev, re-indexing, etc.
+
+The "e" implementation might look like this:
+
+```
+(def (edit-block)
+  (let* ((idx (current-block))
+         (b (get-block idx))
+         (tmp (make-tmp b))
+         (res (run-editor tmp)))
+    (if res
+      (process-tmp tmp)
+      (prompt "editor non-zero exit; changes abandoned"))))
+```
+
+Here we are assuming a run-editor implementation and some other functions to make this work.
+
+A simpler example might be just our current templates themselves.
+
+```
+(def (comment-to-prompt comment)
+  (concat "```c\n"
+          comment
+          "```\n"
+          "Write the code. Reply only with code.\n"))
+```
+
+Of course the complex part here is actually the block reference expansion.
+
+So the current iteration of cmpr is just a specialization of this more general tool.
+
+
+
+
+
+
+
+
+idea
+----
+20240618
+
+"English zen garden".
+
+The idea is to recreate the CSS zen garden of yore with an English version.
+
+The same HTML and the same essential idea of each of the original stylesheets, but expressed in English (as in my 2048).
+
+Then because we're not trying to rip off the original actual CSS, we might try to find more abstract ways to describe the result we want, or do clean-room implementations (without looking at the CSS, just the rendering) etc.
+
+Now we have the connection to the "database idea".
+
+If we need to create some assets, such as background images, we can use any AI image generator.
+
+To do that, we might want to have a prompt stored with the CSS.
+
+This is not exactly core cmpr feature set, but it could be a shared "recipe".
+
+In other words, we should have blocks that we can look up and just fetch, and then those blocks should do things to our blocks.
+
+This is where the "database idea" is going.
+
+Then the core cmpr feature set of v8 is essentially a set of keybindings to a set of blocks that implement our operations.
+
+This means that for different tasks we could use the tool in different ways, and it becomes quite customizable.
+
+Something like a gen-ai image feature requires network stuff, secrets (API keys) and so on.
+So it's actually quite involved.
+But theoretically we could have a simplified interface (a DSL) and turn our frontend into an application of that.
+
+The idea is that then we'd have user-editable English that would generate our DSL (with some built-in or local or inexpensive LLM) and people could share these blocks, compile them locally into configuration / code, without debugging, and then interpret them.
+
+
+
+
+
+
+
+
+implementation plan
+----
+20240618
+
+Implementing the logprobs feature.
+
+We get the log probs from the API by just asking for it.
+
+Then we just have to figure out how to display them.
+
+We can do all this with escape codes.
+
+It's a bit like our templating or DSL or database idea again.
+We could spend a little time thinking about how much of it to abstract out into general features.
+
+In other words, we could try to make the terminal highlighting something easy enough to re-use that other people would get some other uses for it without having to do the same amount of work.
+
+
+
+
+
+
+
+
+idea
+----
+20240618
+
+Blocks having arguments.
+
+The idea is to have functions that take blocks as arguments and produce blocks as output.
+
+This is related to the idea of block references but came up while thinking about the proofs / fixed point stuff.
+
+If we have a "proof template" this is actually a recipe for creating another block.
+
+In general we might have blocks that run and create other blocks.
+
+The fixed point is when all the blocks that there are are quiescent.
+
+In other words... what if blocks could run in the background?
+
+Then you can simply add a block to your project, and the block will run, that is, it will generate a stream of potential changes to other blocks.
+If these changes are automatically accepted, then the whole system is adapting itself continuously until it settles (with more or less human involvement).
+
+
+
+
+
+
+
+
+implementation plan
+----
+20240621
+
+I'm going to add sqlite.
+
+Then I'm reimplementing the undo caching.
+
+
+
+
+
+
+
+
+idea
+----
+20240621
+
+A simple idea: comments apply to revs (a version fixed in time).
+That means if you comment on a rev, then you can refer to that rev, with its comments.
+For example the NL description can say "like #block@xyz" where block is a blockid and xyz is a short id string that is assigned when needed.
+For example, the first time someone refers to a block, it is added to a file "blockrefs" which contains the mapping "xyz = 0123456789ABCDEF".
