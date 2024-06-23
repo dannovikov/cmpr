@@ -172,6 +172,7 @@
 
 
 WHAT WE ARE CURRENTLY DOING:
+  → explore "prompt palette" idea
   → bump version and push v9
 
 
@@ -181,6 +182,7 @@ WHAT WE ARE CURRENTLY DOING:
     scope the templating work (first pass: template our own stuff)
     change the "----" thing now that chatgpt does markdown everywhere
     dedup transitive block references
+    make opening the file instead of the block an option ('E'?)
     Arena overflow for spans
     I think flush should probably never apply to cmp, only out
     "Error: Block does not belong to any file." happened
@@ -190,7 +192,6 @@ WHAT WE ARE CURRENTLY DOING:
     "@@" or sth is menu of blocks that refer to us
     automatically suggest regen of stale downstream blocks
     prt_exit() is probably actually a good idea
-    explore "prompt palette" idea
     keep ollama model loaded
     make LLM calls asynchronous
     clipboard model set automatically
