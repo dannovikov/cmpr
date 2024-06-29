@@ -120,11 +120,11 @@ So the block size is determined by the amount of code that the LLM can write "in
 
 ## Quick start:
 
-0. Recommended: look at some of the sample code above or watch the 2048 demo video to see if the idea appeals to you; consider experimenting with bare ChatGPT program generation first if you haven't already.
+0. Recommended: look at some of the sample code above or watch the 2048 demo video; consider experimenting with bare ChatGPT program generation first.
 1. Get the code and build; assuming git repo at ~/cmpr and you have gcc, `cd cmpr && make && sudo make install` should do.
-2. Go to (or create) the directory for your project and run `cmpr --init`, this creates a `.cmpr/` directory (like git) with a conf file and some other stuff.
+2. Go to (or create) the directory for your project and run `cmpr --init`, this creates a `.cmpr/` directory and makes this a cmpr project.
 3. `export EDITOR=emacs` or whatever editor you want to use, otherwise just `vi` will be run by default.
-4. Run `cmpr --init` in your project directory, then `cmpr` and it will ask you some configuration questions.
+4. Run `cmpr` in your project directory, and it will ask you some configuration questions.
    If you want to change the answers later, you can edit the .cmpr/conf file.
 5. Right now things are rough and changing all the time, so stop by discord and ask if you hit any roadblocks!
 

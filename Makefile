@@ -10,7 +10,9 @@ LDFLAGS := -lm
 debug: CFLAGS := -g -O0 -Wall -fsanitize=address
 debug: dist/cmpr
 
-dev: CFLAGS := -O2 -Wall -Werror -fsanitize=address
+# TODO: we should put the different builds in different output directories; currently switching requires `make -B` as the .o files will be incompatible due to libasan
+
+dev: CFLAGS := -g -O2 -Wall -Werror -fsanitize=address
 dev: dist/cmpr
 
 dist/cmpr: cmpr.c fdecls.h spanio.c siphash/siphash.o siphash/halfsiphash.o

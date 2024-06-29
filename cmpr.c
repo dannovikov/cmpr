@@ -623,7 +623,8 @@ void call_llm(span model, json messages, void (*cb)(span)) {
     }
 
     if (!result.success) {
-        prt("Error: %.*s", len(result.error), result.error.buf);
+        prt("Error: %.*s\n", len(result.error), result.error.buf);
+        prt("Hit any key to continue...\n");
         flush();
         getch(); // User acknowledgment to move past error
     } else {
@@ -1635,9 +1636,15 @@ We write the filename into our filenames buffer, and then construct a span that 
 Next we write a comparator function to use with qsort, which compares to spans using span_cmp.
 (Note that span_cmp does not have the required signature for use with qsort; we must write a wrapper function directly before the call to qsort that does.)
 We use qsort to sort all the filename spans lexicographically (which is also chronologically, due to our naming scheme).
+Also, clang does not allow functions to be nested, even though gcc does, so we declare this function immediately before get_revs itself.
 
 Finally, we call get_revs_2, which handles the rest of the work.
 */
+
+// note: fix for clang
+int span_cmp_wrapper(const void *a, const void *b) {
+    return span_cmp(*(span *)a, *(span *)b);
+}
 
 void get_revs() {
     span revdir = get_revdir();
@@ -1689,11 +1696,6 @@ void get_revs() {
     }
 
     closedir(dir);
-
-    int span_cmp_wrapper(const void *a, const void *b)
-    {
-        return span_cmp(*(span *)a, *(span *)b);
-    }
 
     qsort(state->revs.filenames.a, state->revs.filenames.n, sizeof(span), span_cmp_wrapper);
 
@@ -2821,10 +2823,19 @@ We allocate a checksums of this many.
 Then we take lines one by one, get the selected checksum for each one, and add it to the checksums.
 
 We sort the checksums using qsort.
-For this we need to declare a comparator function inline, handling the void* type that qsort expects.
+For this we need to declare a comparator function, handling the void* type that qsort expects.
+
+Though gcc does allow this function to be declared inline, for compatibility with clang we declare it immediately before sorted_line_checksums itself.
 
 We remove duplicates by keeping track of an offset and overwriting forward in a single pass over the sorted list.
 */
+
+// fix for clang
+int checksum_cmp(const void* a, const void* b) {
+    const checksum* cksum1 = (const checksum*)a;
+    const checksum* cksum2 = (const checksum*)b;
+    return (cksum1->__u > cksum2->__u) - (cksum1->__u < cksum2->__u);
+}
 
 checksums sorted_line_checksums(span input) {
     int line_count = 0;
@@ -2840,12 +2851,6 @@ checksums sorted_line_checksums(span input) {
         span line = next_line(&temp);
         checksum cksum = selected_checksum(line);
         checksums_push(&cksums, cksum);
-    }
-
-    int checksum_cmp(const void* a, const void* b) {
-        const checksum* cksum1 = (const checksum*)a;
-        const checksum* cksum2 = (const checksum*)b;
-        return (cksum1->__u > cksum2->__u) - (cksum1->__u < cksum2->__u);
     }
 
     qsort(cksums.a, cksums.n, sizeof(checksum), checksum_cmp);
@@ -4843,7 +4848,7 @@ int launch_editor(char* filename) {
         editor = "vi"; // Default to vi if EDITOR is not set
     }
 
-    pid_t pid = fork();
+    pid_t pid = vfork();
     if (pid == -1) {
         perror("fork failed");
         exit(EXIT_FAILURE);

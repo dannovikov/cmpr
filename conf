@@ -1,4 +1,4 @@
-cmprdir: .cmpr
+cmprdir: .cmpr/
 buildcmd: make dev && ctags spanio.c cmpr.c
 bootstrap: ./bootstrap.sh
 cbcopy: xclip -i -selection clipboard
